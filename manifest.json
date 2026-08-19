@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "id": "tsouth89.omcp",
+  "name": "OMCP",
+  "version": "1.0.0",
+  "author": "Tyler South",
+  "license": "MIT",
+  "description": "Turn this desktop into an MCP server so Claude Code and other agents can drive it — themes, windows, workspaces, notifications, screenshots — and watch every move land live in the bar.",
+  "homepage": "https://github.com/tsouth89/omarchy-omcp",
+  "kinds": ["bar-widget", "service"],
+  "entryPoints": {
+    "barWidget": "Panel.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "OMCP",
+    "description": "A ghost in the bar that lights up when an agent touches your desktop, with per-tool permissions, held approvals, and a kill switch.",
+    "category": "AI",
+    "aliases": ["omcp", "mcp", "agent", "ghost"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "feedLength": 40,
+      "showIdleGhost": true
+    },
+    "schema": [
+      {
+        "key": "feedLength",
+        "type": "integer",
+        "label": "Activity lines to keep on screen",
+        "min": 5,
+        "max": 200,
+        "step": 5,
+        "defaultValue": 40,
+        "description": "How much of the agent's history the panel shows."
+      },
+      {
+        "key": "showIdleGhost",
+        "type": "boolean",
+        "label": "Keep the ghost visible when idle",
+        "defaultValue": true,
+        "description": "Turn this off to hide the bar icon until an agent connects."
+      }
+    ]
+  }
+}
