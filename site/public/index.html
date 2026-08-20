@@ -147,9 +147,56 @@
     border-radius: 0;
     background: var(--panel);
   }
-  .zoom { display: block; border: 0; }
-  .zoom:hover { border: 0; }
+  .zoom {
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    cursor: zoom-in;
+    font: inherit;
+    text-align: inherit;
+  }
   .zoom:hover .shot { border-color: var(--accent); }
+  .zoom:focus-visible { outline: 1px solid var(--accent); outline-offset: 4px; }
+  .lightbox {
+    width: 100vw;
+    max-width: none;
+    height: 100vh;
+    max-height: none;
+    margin: 0;
+    padding: 36px;
+    border: 0;
+    background: rgb(0 0 0 / 88%);
+    overflow: hidden;
+  }
+  .lightbox::backdrop { background: transparent; }
+  .lightbox[open] { display: grid; place-items: center; }
+  .lightbox img {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+  }
+  .lightbox-close {
+    position: fixed;
+    top: 14px;
+    right: 18px;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border: 1px solid var(--dim);
+    background: var(--panel);
+    color: var(--fg);
+    cursor: pointer;
+    font: 24px/1 var(--mono);
+  }
+  .lightbox-close:hover { border-color: var(--accent); color: var(--accent); }
+  .lightbox-close:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
   figcaption { margin-top: 10px; color: var(--dim); font-size: 12px; }
   .hero-demo { margin-top: 34px; }
   .ghosts { margin-top: 26px; }
@@ -227,6 +274,7 @@
     pre { margin-left: -6px; margin-right: -6px; padding: 15px; font-size: 12px; }
     .facts .sep { display: none; }
     .facts span { display: block; }
+    .lightbox { padding: 24px 10px; }
   }
 </style>
 </head>
@@ -251,11 +299,11 @@
   </p>
 
   <figure class="hero-demo">
-    <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/demo.gif" target="_blank" rel="noopener">
+    <button class="zoom" type="button" aria-label="Enlarge demo recording">
       <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/demo.gif"
-           width="1150" height="360" fetchpriority="high" decoding="async" alt="A prompt changes the desktop theme, volume, do-not-disturb state, and sends a notification while OMCP records each action">
-    </a>
-    <figcaption>One prompt, four tool calls, no hands. Recorded in one take.</figcaption>
+           width="1600" height="501" fetchpriority="high" decoding="async" alt="A prompt prepares the desktop for focused writing while OMCP records the theme, wallpaper, do-not-disturb, and stay-awake changes">
+    </button>
+    <figcaption>One prompt, four desktop changes, no hands. Recorded in one take.</figcaption>
   </figure>
 </header>
 
@@ -285,10 +333,10 @@
     <strong>visible and revocable.</strong>
   </p>
   <figure class="ghosts">
-    <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/ghost-states.png" target="_blank" rel="noopener">
+    <button class="zoom" type="button" aria-label="Enlarge OMCP status bar states">
       <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/ghost-states.png"
            width="1168" height="214" loading="lazy" decoding="async" alt="The four OMCP status bar states: no agent, connected, waiting on you, and paused">
-    </a>
+    </button>
     <figcaption>The ghost always tells you where you stand.</figcaption>
   </figure>
 </section>
@@ -304,10 +352,10 @@
       what was refused.
     </p>
     <figure>
-      <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/panel.png" target="_blank" rel="noopener">
+      <button class="zoom" type="button" aria-label="Enlarge OMCP activity feed">
         <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/panel.png"
              width="481" height="517" loading="lazy" decoding="async" alt="OMCP activity feed showing a connected Claude Code agent and its recent calls">
-      </a>
+      </button>
     </figure>
   </div>
 
@@ -316,10 +364,10 @@
     <p><strong>Allow</strong> runs. <strong>Ask</strong> parks the call mid-flight and waits for you. <strong>Off</strong> removes the tool from the agent's tool list; it cannot discover that the tool exists.</p>
     <p>Five sensitive actions ship as Ask. You get 60 seconds. No answer means denied.</p>
     <figure>
-      <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/permissions.png" target="_blank" rel="noopener">
+      <button class="zoom" type="button" aria-label="Enlarge OMCP permissions list">
         <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/permissions.png"
              width="481" height="716" loading="lazy" decoding="async" alt="OMCP permissions list with Allow and Ask states">
-      </a>
+      </button>
     </figure>
   </div>
 
@@ -330,10 +378,10 @@
       let an agent read your screen would not be a stop control.
     </p>
     <figure>
-      <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/approval.png" target="_blank" rel="noopener">
+      <button class="zoom" type="button" aria-label="Enlarge OMCP approval request">
         <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/approval.png"
              width="481" height="605" loading="lazy" decoding="async" alt="OMCP holding an agent request to launch Obsidian for human approval">
-      </a>
+      </button>
     </figure>
   </div>
 
@@ -431,5 +479,33 @@
 </footer>
 
 </div>
+
+<dialog class="lightbox" aria-label="Enlarged image">
+  <button class="lightbox-close" type="button" aria-label="Close enlarged image">&times;</button>
+  <img src="" alt="">
+</dialog>
+
+<script>
+  const lightbox = document.querySelector('.lightbox');
+  const lightboxImage = lightbox.querySelector('img');
+
+  document.querySelectorAll('.zoom').forEach((button) => {
+    button.addEventListener('click', () => {
+      const image = button.querySelector('img');
+      lightboxImage.src = image.currentSrc || image.src;
+      lightboxImage.alt = image.alt;
+      lightbox.showModal();
+    });
+  });
+
+  lightbox.querySelector('.lightbox-close').addEventListener('click', () => lightbox.close());
+  lightbox.addEventListener('click', (event) => {
+    if (event.target === lightbox) lightbox.close();
+  });
+  lightbox.addEventListener('close', () => {
+    lightboxImage.src = '';
+    lightboxImage.alt = '';
+  });
+</script>
 </body>
 </html>
