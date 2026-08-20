@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _PATH = os.path.join(ROOT, "bin", "omcp")
@@ -142,6 +143,87 @@ class DesktopEntries(unittest.TestCase):
         with self.assertRaises(omcp.ToolError):
             omcp.describe_intent("launch_app", {"app": "omcp-hidden"})
         self.assertEqual(omcp.describe_intent("launch_app", {"app": "omcp-visible"}), "launch Visible App")
+
+    def test_approved_launch_uses_the_exact_desktop_entry_that_was_shown(self):
+        original = "[Desktop Entry]\nType=Application\nName=Approved App\nExec=/usr/bin/true\n"
+        replacement = "[Desktop Entry]\nType=Application\nName=Changed App\nExec=/usr/bin/false\n"
+        self._write("omcp-race", original)
+
+        summary, approved_run = omcp.prepare_approval(
+            "launch_app", {"app": "omcp-race"}, omcp.TOOLS["launch_app"])
+        self._write("omcp-race", replacement)
+
+        launched = {}
+
+        def capture(argv, settle=1.5):
+            launched["argv"] = argv
+            with open(argv[2], "rb") as fh:
+                launched["contents"] = fh.read()
+
+        old_state = omcp.STATE_DIR
+        omcp.STATE_DIR = self.tmp
+        try:
+            with mock.patch.object(omcp, "ensure_dirs"), mock.patch.object(omcp, "launch_detached", capture):
+                payload, _ = approved_run()
+        finally:
+            omcp.STATE_DIR = old_state
+
+        self.assertEqual(summary, "launch Approved App")
+        self.assertEqual(payload["name"], "Approved App")
+        self.assertEqual(launched["argv"][:2], ["gio", "launch"])
+        self.assertEqual(launched["contents"], original.encode())
+        self.assertFalse(os.path.exists(launched["argv"][2]))
+
+
+class ApprovalBinding(unittest.TestCase):
+    def test_window_address_reuse_is_rejected_after_approval(self):
+        address = "0x55c2f0d67580"
+        original = {"address": address, "pid": 10, "initialClass": "foot", "class": "foot", "title": "Shell"}
+        replacement = {"address": address, "pid": 20, "initialClass": "browser", "class": "browser",
+                       "title": "Browser"}
+        with mock.patch.object(omcp, "run_json", side_effect=[[original], [replacement]]), \
+                mock.patch.object(omcp, "dispatch") as dispatch:
+            summary, approved_run = omcp.prepare_approval(
+                "close_window", {"address": address}, omcp.TOOLS["close_window"])
+            with self.assertRaisesRegex(omcp.ToolError, "changed while approval was pending"):
+                approved_run()
+        self.assertEqual(summary, "close foot — Shell")
+        dispatch.assert_not_called()
+
+    def test_fuzzy_theme_resolution_is_bound_before_approval(self):
+        with mock.patch.object(omcp, "theme_names", return_value=["Catppuccin Latte"]), \
+                mock.patch.object(omcp, "run") as run:
+            summary, approved_run = omcp.prepare_approval(
+                "set_theme", {"name": "latte"}, omcp.TOOLS["set_theme"])
+            payload, _ = approved_run()
+        self.assertEqual(summary, "set the theme to Catppuccin Latte")
+        self.assertEqual(payload["theme"], "Catppuccin Latte")
+        run.assert_called_once_with(["omarchy", "theme", "set", "Catppuccin Latte"], timeout=30)
+
+    def test_focused_window_screenshot_rejects_a_replacement_window(self):
+        address = "0x55c2f0d67580"
+        original = {"address": address, "pid": 10, "initialClass": "foot", "initialTitle": "Shell",
+                    "class": "foot", "title": "Shell", "at": [10, 20], "size": [800, 600]}
+        replacement = {"address": address, "pid": 20, "initialClass": "browser", "initialTitle": "Browser",
+                       "class": "browser", "title": "Browser", "at": [10, 20], "size": [800, 600]}
+        with mock.patch.object(omcp, "run_json", side_effect=[original, [replacement]]), \
+                mock.patch.object(omcp, "capture_screenshot") as capture:
+            summary, approved_run = omcp.prepare_approval(
+                "screenshot", {"target": "window"}, omcp.TOOLS["screenshot"])
+            with self.assertRaisesRegex(omcp.ToolError, "changed while approval was pending"):
+                approved_run()
+        self.assertEqual(summary, "take a screenshot of foot — Shell")
+        capture.assert_not_called()
+
+    def test_screen_screenshot_stays_bound_to_the_approved_monitor(self):
+        monitors = [{"name": "DP-1", "focused": True}, {"name": "HDMI-A-1", "focused": False}]
+        with mock.patch.object(omcp, "run_json", return_value=monitors), \
+                mock.patch.object(omcp, "capture_screenshot", return_value=({}, "captured")) as capture:
+            summary, approved_run = omcp.prepare_approval(
+                "screenshot", {"target": "screen", "format": "png"}, omcp.TOOLS["screenshot"])
+            approved_run()
+        self.assertEqual(summary, "take a screenshot of monitor DP-1")
+        capture.assert_called_once_with(["grim", "-t", "png", "-o", "DP-1"], "png", "DP-1")
 
 
 class ConfigProfiles(unittest.TestCase):

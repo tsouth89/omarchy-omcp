@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 PROTOCOL_DEFAULT = "2025-06-18"
 SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", "2025-06-18")
 
@@ -747,10 +747,15 @@ def want_bool(args, key, default=None):
     raise ToolError("%s must be true or false" % key)
 
 
-def want_address(args, key="address"):
+def parse_address(args, key="address"):
     address = str(want(args, key)).strip()
     if not ADDRESS_RE.match(address):
         raise ToolError("%s must be a Hyprland window address like 0x55c2f0d67580" % key)
+    return address
+
+
+def want_address(args, key="address"):
+    address = parse_address(args, key)
     known = {client.get("address") for client in run_json(["hyprctl", "-j", "clients"])}
     if address not in known:
         raise ToolError("no open window has the address %s — call list_windows for current addresses" % address)
@@ -826,6 +831,37 @@ def tool_list_themes(args):
     return {"themes": names, "current": current_theme()}, "listed %d themes" % len(names)
 
 
+def parse_desktop_entry(app_id, path, contents, keep_contents=False):
+    entry = {"id": app_id, "name": app_id, "path": path, "keywords": ""}
+    if keep_contents:
+        entry["contents"] = contents
+    in_main = False
+    for line in contents.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            in_main = line == "[Desktop Entry]"
+            continue
+        if not in_main:
+            continue
+        if line.startswith("Name=") and entry["name"] == app_id:
+            entry["name"] = line[5:].strip()
+        elif line.startswith(("GenericName=", "Keywords=", "Comment=")):
+            entry["keywords"] += " " + line.split("=", 1)[1]
+        elif line.startswith("NoDisplay=") and line[10:].strip().lower() == "true":
+            entry["hidden"] = True
+        elif line.startswith("Type=") and line[5:].strip() != "Application":
+            entry["hidden"] = True
+    return entry
+
+
+def read_desktop_entry(app_id, path, keep_contents=False):
+    with open(path, "rb") as fh:
+        contents = fh.read(1024 * 1024 + 1)
+    if len(contents) > 1024 * 1024:
+        raise ToolError("desktop entry %s is too large" % app_id)
+    return parse_desktop_entry(app_id, path, contents, keep_contents=keep_contents)
+
+
 def desktop_entries():
     """Every launchable .desktop on this machine, newest trusted dir wins.
 
@@ -848,26 +884,9 @@ def desktop_entries():
             if app_id in found:
                 continue
             path = os.path.join(directory, name)
-            entry = {"id": app_id, "name": app_id, "path": path, "keywords": ""}
             try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    in_main = False
-                    for line in fh:
-                        line = line.strip()
-                        if line.startswith("["):
-                            in_main = line == "[Desktop Entry]"
-                            continue
-                        if not in_main:
-                            continue
-                        if line.startswith("Name=") and entry["name"] == app_id:
-                            entry["name"] = line[5:].strip()
-                        elif line.startswith(("GenericName=", "Keywords=", "Comment=")):
-                            entry["keywords"] += " " + line.split("=", 1)[1]
-                        elif line.startswith("NoDisplay=") and line[10:].strip().lower() == "true":
-                            entry["hidden"] = True
-                        elif line.startswith("Type=") and line[5:].strip() != "Application":
-                            entry["hidden"] = True
-            except OSError:
+                entry = read_desktop_entry(app_id, path)
+            except (OSError, ToolError):
                 continue
             found[app_id] = entry
     return found
@@ -891,7 +910,7 @@ def focused_output():
     return None
 
 
-def tool_screenshot(args):
+def screenshot_options(args):
     target = str(args.get("target") or "screen").strip()
     image_format = str(args.get("format") or "jpeg").strip().lower()
     if image_format not in ("jpeg", "png"):
@@ -900,6 +919,30 @@ def tool_screenshot(args):
     command = ["grim", "-t", image_format]
     if image_format == "jpeg":
         command += ["-q", str(want_int(args, "quality", 1, 100) if "quality" in args else 80)]
+    return target, image_format, command
+
+
+def capture_screenshot(command, image_format, label):
+    path = os.path.join(STATE_DIR, "shot-%d.%s" % (os.getpid(), "jpg" if image_format == "jpeg" else "png"))
+    ensure_dirs()
+    try:
+        run(command + [path], timeout=20)
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        if len(raw) > SCREENSHOT_MAX_BYTES:
+            raise ToolError("screenshot is too large to return (%d bytes)" % len(raw))
+        data = base64.b64encode(raw).decode("ascii")
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return ({"__image__": data, "__mime__": "image/jpeg" if image_format == "jpeg" else "image/png"},
+            "took a screenshot of %s" % label)
+
+
+def tool_screenshot(args):
+    target, image_format, command = screenshot_options(args)
 
     if target == "window":
         window = run_json(["hyprctl", "-j", "activewindow"])
@@ -919,23 +962,7 @@ def tool_screenshot(args):
             raise ToolError("unknown target %r — use screen, window, or one of: %s" % (target, ", ".join(names)))
         command += ["-o", target]
         label = target
-
-    path = os.path.join(STATE_DIR, "shot-%d.%s" % (os.getpid(), "jpg" if image_format == "jpeg" else "png"))
-    ensure_dirs()
-    try:
-        run(command + [path], timeout=20)
-        with open(path, "rb") as fh:
-            raw = fh.read()
-        if len(raw) > SCREENSHOT_MAX_BYTES:
-            raise ToolError("screenshot is too large to return (%d bytes)" % len(raw))
-        data = base64.b64encode(raw).decode("ascii")
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-    return ({"__image__": data, "__mime__": "image/jpeg" if image_format == "jpeg" else "image/png"},
-            "took a screenshot of %s" % label)
+    return capture_screenshot(command, image_format, label)
 
 
 def tool_read_clipboard(args):
@@ -1005,6 +1032,12 @@ def tool_get_system_stats(args):
 
 def tool_set_theme(args):
     requested = str(want(args, "name")).strip()
+    match = resolve_theme(requested)
+    run(["omarchy", "theme", "set", match], timeout=30)
+    return {"theme": match}, "set the theme to %s" % match
+
+
+def resolve_theme(requested):
     names = theme_names()
     match = next((n for n in names if n.lower() == requested.lower()), None)
     if match is None:
@@ -1013,6 +1046,10 @@ def tool_set_theme(args):
             match = partial[0]
         else:
             raise ToolError("no theme called %r. Installed themes: %s" % (requested, ", ".join(names)))
+    return match
+
+
+def set_resolved_theme(match):
     run(["omarchy", "theme", "set", match], timeout=30)
     return {"theme": match}, "set the theme to %s" % match
 
@@ -1116,6 +1153,39 @@ def tool_launch_app(args):
     if entry is None:
         raise ToolError("no single app matches %r — call list_apps to see valid ids" % requested)
     launch_detached(["gio", "launch", entry["path"]])
+    return {"launched": entry["id"], "name": entry["name"]}, "launched %s" % entry["name"]
+
+
+def launch_approved_app(entry):
+    """Launch the exact desktop entry bytes that the user approved.
+
+    The installed entry is mutable, including while an Ask prompt is open. A
+    private snapshot prevents a second lookup, or an edit to the original
+    file, from changing the command after approval.
+    """
+    ensure_dirs()
+    snapshot_dir = None
+    snapshot = None
+    try:
+        snapshot_dir = tempfile.mkdtemp(prefix="approved-app-", dir=STATE_DIR)
+        snapshot = os.path.join(snapshot_dir, os.path.basename(entry["path"]))
+        with open(snapshot, "xb") as fh:
+            fh.write(entry["contents"])
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(snapshot, 0o600)
+        launch_detached(["gio", "launch", snapshot])
+    finally:
+        if snapshot is not None:
+            try:
+                os.unlink(snapshot)
+            except OSError:
+                pass
+        if snapshot_dir is not None:
+            try:
+                os.rmdir(snapshot_dir)
+            except OSError:
+                pass
     return {"launched": entry["id"], "name": entry["name"]}, "launched %s" % entry["name"]
 
 
@@ -1627,10 +1697,11 @@ def call_tool(name, arguments, agent_name):
         raise ToolError("%s is turned off in OMCP's permissions. The user can enable it "
                         "from the bar panel." % name)
 
+    approved_run = None
     if permission == ASK:
         # Validate (and name the target) before parking the call. Approving
         # "close window" with no title is the thing Ask exists to prevent.
-        summary = describe_intent(name, arguments)
+        summary, approved_run = prepare_approval(name, arguments, spec)
         granted, reason = request_approval(agent_name, name, summary, json.dumps(arguments, ensure_ascii=False))
         if not granted:
             log_activity({"agent": agent_name, "tool": name, "state": "denied", "summary": reason})
@@ -1649,7 +1720,7 @@ def call_tool(name, arguments, agent_name):
 
     started = time.time()
     try:
-        payload, summary = spec["run"](arguments or {})
+        payload, summary = approved_run() if approved_run is not None else spec["run"](arguments or {})
     except ToolError as exc:
         log_activity({"agent": agent_name, "tool": name, "state": "error", "summary": str(exc)})
         raise
@@ -1664,14 +1735,113 @@ def call_tool(name, arguments, agent_name):
 
 def window_label(address):
     window = next((c for c in run_json(["hyprctl", "-j", "clients"]) if c.get("address") == address), {})
+    return window_label_from(window) or address
+
+
+def window_label_from(window):
     klass = clean_label(window.get("class"), "", limit=40)
     title = clean_label(window.get("title"), "", limit=60)
     if klass and title:
         return "%s — %s" % (klass, title)
-    return title or klass or address
+    return title or klass
 
 
-def describe_intent(name, arguments):
+WINDOW_TARGET_TOOLS = {
+    "close_window", "focus_window", "move_window_to_workspace",
+    "set_window_floating", "set_window_fullscreen",
+}
+
+
+def window_target(address):
+    window = next((c for c in run_json(["hyprctl", "-j", "clients"])
+                   if c.get("address") == address), None)
+    if window is None:
+        raise ToolError("there is no open window at %s" % address)
+    return window
+
+
+def window_identity(window):
+    """Fields that remain stable for one Hyprland client as its title changes."""
+    pid = window.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        raise ToolError("cannot safely identify this window while approval is pending")
+    return (pid, window.get("initialClass"), window.get("initialTitle"), window.get("xwayland"))
+
+
+def run_approved_window_tool(name, arguments, identity):
+    current = window_target(parse_address(arguments))
+    if window_identity(current) != identity:
+        raise ToolError("the window at this address changed while approval was pending")
+    return TOOLS[name]["run"](arguments or {})
+
+
+def run_approved_window_screenshot(command, image_format, address, identity, label):
+    current = window_target(address)
+    if window_identity(current) != identity:
+        raise ToolError("the window selected for the screenshot changed while approval was pending")
+    at, size = current.get("at"), current.get("size")
+    if not at or not size:
+        raise ToolError("the approved window no longer has a captureable area")
+    command = command + ["-g", "%d,%d %dx%d" % (at[0], at[1], size[0], size[1])]
+    return capture_screenshot(command, image_format, label)
+
+
+def prepare_screenshot_approval(arguments):
+    target, image_format, command = screenshot_options(arguments)
+    if target == "window":
+        window = run_json(["hyprctl", "-j", "activewindow"])
+        address = window.get("address")
+        if not address:
+            raise ToolError("there is no focused window to capture")
+        identity = window_identity(window)
+        label = window_label_from(window) or address
+        return ("take a screenshot of %s" % label,
+                lambda: run_approved_window_screenshot(command, image_format, address, identity, label))
+    if target == "screen":
+        output = focused_output()
+        if not output:
+            raise ToolError("there is no focused monitor to capture")
+        command += ["-o", output]
+        return "take a screenshot of monitor %s" % output, \
+            lambda: capture_screenshot(command, image_format, output)
+    names = [m.get("name") for m in run_json(["hyprctl", "-j", "monitors"])]
+    if target not in names:
+        raise ToolError("unknown target %r — use screen, window, or one of: %s" % (target, ", ".join(names)))
+    command += ["-o", target]
+    return "take a screenshot of monitor %s" % target, \
+        lambda: capture_screenshot(command, image_format, target)
+
+
+def prepare_approval(name, arguments, spec):
+    """Bind an Ask decision to the exact target resolved before the prompt."""
+    arguments = arguments or {}
+    if name == "screenshot":
+        return prepare_screenshot_approval(arguments)
+    if name == "launch_app":
+        requested = str(want(arguments, "app")).strip()
+        entry = resolve_app(requested)
+        if entry is None:
+            raise ToolError("no single app matches %r — call list_apps to see valid ids" % requested)
+        try:
+            entry = read_desktop_entry(entry["id"], entry["path"], keep_contents=True)
+        except OSError:
+            raise ToolError("the selected desktop entry disappeared before approval")
+        if entry.get("hidden"):
+            raise ToolError("the selected desktop entry is not launchable")
+        return "launch %s" % entry["name"], lambda: launch_approved_app(entry)
+    if name == "set_theme":
+        match = resolve_theme(str(want(arguments, "name")).strip())
+        return "set the theme to %s" % match, lambda: set_resolved_theme(match)
+    if name in WINDOW_TARGET_TOOLS:
+        address = parse_address(arguments)
+        target = window_target(address)
+        summary = describe_intent(name, arguments, target=target)
+        identity = window_identity(target)
+        return summary, lambda: run_approved_window_tool(name, arguments, identity)
+    return describe_intent(name, arguments), lambda: spec["run"](arguments or {})
+
+
+def describe_intent(name, arguments, target=None):
     """A one-line, human-readable version of what is about to happen.
 
     This is what the approval prompt and the activity feed show, so it has to
@@ -1694,18 +1864,20 @@ def describe_intent(name, arguments):
     if name == "open_url":
         return "open %s" % want_url(arguments)
     if name == "set_theme":
-        return "set the theme to %s" % clean_label(arguments.get("name"), "another theme", limit=48)
-    if name == "close_window":
-        return "close %s" % window_label(want_address(arguments))
-    if name == "focus_window":
-        return "focus %s" % window_label(want_address(arguments))
-    if name in ("set_window_floating", "set_window_fullscreen"):
-        verb = "toggle floating on" if name == "set_window_floating" else "toggle fullscreen on"
-        return "%s %s" % (verb, window_label(want_address(arguments)))
-    if name == "move_window_to_workspace":
-        address = want_address(arguments)
-        workspace = want_int(arguments, "workspace", 1, 99)
-        return "move %s to workspace %d" % (window_label(address), workspace)
+        return "set the theme to %s" % resolve_theme(str(want(arguments, "name")).strip())
+    if name in WINDOW_TARGET_TOOLS:
+        address = parse_address(arguments) if target is not None else want_address(arguments)
+        label = (window_label_from(target) or address) if target is not None else window_label(address)
+        if name == "close_window":
+            return "close %s" % label
+        if name == "focus_window":
+            return "focus %s" % label
+        if name == "move_window_to_workspace":
+            workspace = want_int(arguments, "workspace", 1, 99)
+            return "move %s to workspace %d" % (label, workspace)
+        if name in ("set_window_floating", "set_window_fullscreen"):
+            verb = "toggle floating on" if name == "set_window_floating" else "toggle fullscreen on"
+            return "%s %s" % (verb, label)
     if name == "lock_screen":
         return "lock the screen"
     spec = TOOLS.get(name) or {}

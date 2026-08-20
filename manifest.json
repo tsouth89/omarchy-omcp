@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "tsouth89.omcp",
   "name": "OMCP",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "Tyler South",
   "license": "MIT",
   "description": "Turn this desktop into an MCP server so Claude Code and other agents can drive it — themes, windows, workspaces, notifications, screenshots — and watch every move land live in the bar.",
