@@ -1004,7 +1004,22 @@ def describe_intent(name, arguments):
     """
     arguments = arguments or {}
     if name == "launch_app":
-        return "launch %s" % arguments.get("app", "an app")
+        # Resolve to the name the user would recognise from their launcher, so
+        # the prompt says "launch Obsidian" rather than echoing a raw id back.
+        requested = str(arguments.get("app", "")).strip()
+        try:
+            entries = desktop_entries()
+            entry = entries.get(requested)
+            if entry is None:
+                lowered = requested.lower()
+                matches = [e for e in entries.values() if not e.get("hidden")
+                           and (e["id"].lower() == lowered or e["name"].lower() == lowered)]
+                entry = matches[0] if len(matches) == 1 else None
+            if entry:
+                return "launch %s" % entry["name"]
+        except OSError:
+            pass
+        return "launch %s" % (requested or "an app")
     if name == "write_clipboard":
         text = str(arguments.get("text", ""))
         preview = text[:40].replace("\n", " ")

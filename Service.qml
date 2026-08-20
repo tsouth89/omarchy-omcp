@@ -168,23 +168,18 @@ Item {
   // only runs while a request is counting down, because that is the only second
   // anyone is watching.
 
+  // One clock, three speeds, because the thing on screen that moves fastest
+  // decides how often anything needs recomputing: a countdown ticks in seconds,
+  // an attached agent's "here 40s" reads wrong if it lags, and an idle machine
+  // has nothing to update at all.
   Timer {
-    interval: 30000
+    interval: root.pending !== null ? 1000 : (root.connected ? 5000 : 30000)
     repeat: true
     running: true
     onTriggered: {
       root.now = Math.floor(Date.now() / 1000)
-      activityFile.reload()   // backstop: recover a lost watch within 30s
-    }
-  }
-
-  Timer {
-    interval: 1000
-    repeat: true
-    running: root.pending !== null
-    onTriggered: {
-      root.now = Math.floor(Date.now() / 1000)
       if (root.pending && root.pending.expires <= root.now) root.pending = null
+      activityFile.reload()   // backstop: recover a watch lost to a rotation
     }
   }
 

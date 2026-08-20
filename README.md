@@ -9,9 +9,15 @@ an agent touches something, and keeps a running list of everything it did.
 
 ![OMCP driving the desktop](docs/demo.gif)
 
-*One prompt: "switch the theme to Tokyo Night, set the volume to 65, turn on do not disturb, send
-me a notification." The ghost twitches on each call, the feed fills in, and the desktop changes
-under it.*
+*One prompt, four tool calls, no hands. The ghost twitches on each one, the feed fills in, and the
+desktop changes underneath. Recorded in one take.*
+
+### The ghost tells you where you stand
+
+![The four ghost states](docs/ghost-states.png)
+
+Dim when nothing is attached. Lit while an agent is connected. Red and breathing when something is
+waiting on your answer. Half-faded when you have pulled the switch.
 
 ## Why this exists
 
@@ -35,11 +41,17 @@ Then open the panel from the bar → **Connect** → copy the one-line command:
 claude mcp add omcp -- ~/.config/omarchy/plugins/tsouth89.omcp/bin/omcp serve
 ```
 
+<img src="docs/connect.png" alt="The connect tab" width="420">
+
 The panel also has the generic `mcpServers` JSON block for Codex, Zed, and anything else. The
 first time an agent connects, you get a notification saying so.
 
 Nothing runs at install time. The MCP server is a single Python 3 file with no dependencies —
 your agent launches it directly over stdio, and it exits when the agent does.
+
+<img src="docs/panel.png" alt="The activity panel" width="420">
+
+Everything an agent touches lands here in plain language — including what it was refused.
 
 ## The tools
 
