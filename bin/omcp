@@ -380,7 +380,11 @@ def request_approval(agent_name, tool, summary, detail):
     }, indent=2) + "\n")
 
     log_activity({"agent": agent_name, "tool": tool, "state": "asked", "summary": summary})
-    notify("OMCP", "%s wants to %s" % (agent_name, summary),
+    # Clear any prompt still on screen from a previous request before posting
+    # this one, so a server that died without cleaning up cannot leave a stale
+    # prompt sitting next to the live one.
+    dismiss_notification(ASK_HEADLINE)
+    notify(ASK_HEADLINE, "%s wants to %s" % (agent_name, summary),
            urgency="critical", exec_on_click="omarchy-shell omcp open")
 
     answer_path = decision_path(request_id)
@@ -393,6 +397,7 @@ def request_approval(agent_name, tool, summary, detail):
             time.sleep(0.15)
         return False, "no answer within %ds" % ASK_TIMEOUT_SECONDS
     finally:
+        dismiss_notification(ASK_HEADLINE)
         try:
             os.unlink(answer_path)
         except OSError:
@@ -476,6 +481,25 @@ def launch_detached(args, settle=1.5):
         return
     if proc.returncode != 0:
         raise ToolError("%s exited with code %d" % (args[0], proc.returncode))
+
+
+ASK_HEADLINE = "OMCP is waiting"
+
+
+def dismiss_notification(headline):
+    """Take a notification back off the screen.
+
+    Omarchy gives critical notifications a duration of 0 — they never expire, so
+    the user can't miss one. That is right for an approval prompt while it is
+    still live, and wrong the moment it is answered: without this the prompts
+    pile up on screen forever, one per request.
+    """
+    try:
+        subprocess.run(["omarchy", "notification", "dismiss", headline],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def notify(title, body="", urgency="normal", exec_on_click=None):
