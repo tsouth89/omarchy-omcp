@@ -20,6 +20,7 @@ import queue
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -65,8 +66,15 @@ def ensure_dirs():
     # version keeps its permissive mode forever unless it is corrected here.
     for f in (ACTIVITY_PATH, AGENTS_PATH, PENDING_PATH, CONFIG_PATH):
         try:
-            if os.path.exists(f) and (os.stat(f).st_mode & 0o077):
-                os.chmod(f, 0o600)
+            info = os.lstat(f)
+        except OSError:
+            continue
+        # Regular files only. Someone who symlinked their config into a dotfiles
+        # repo should not have this quietly rewrite the target's mode.
+        if not stat.S_ISREG(info.st_mode) or not (info.st_mode & 0o077):
+            continue
+        try:
+            os.chmod(f, 0o600)
         except OSError:
             pass
 
@@ -113,7 +121,12 @@ class FileLock:
 
     def __enter__(self):
         self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        except OSError:
+            os.close(self.fd)         # __exit__ never runs if we raise here
+            self.fd = None
+            raise
         return self
 
     def __exit__(self, *_):
@@ -254,11 +267,9 @@ def pid_alive(pid):
     """
     try:
         os.kill(int(pid), 0)
-    except OSError as exc:
-        if exc.errno == errno.EPERM:
-            return False
-        return False
-    except (TypeError, ValueError):
+    except (OSError, TypeError, ValueError):
+        # Includes EPERM: a pid we cannot signal is owned by someone else, so
+        # it is not the agent that registered here.
         return False
     return True
 
@@ -305,12 +316,28 @@ def unregister_agent(pid):
 PENDING_LOCK = PENDING_PATH + ".lock"
 
 
-def _clear_pending():
+def _clear_pending(force=False):
+    """Release the approval slot. Returns whether this process still held it.
+
+    A late `finally` used to delete whatever lock happened to be there. Once a
+    holder's claim expires another agent legitimately takes the slot, so the
+    tardy cleanup would delete the *new* holder's live lock and prompt, and its
+    request would sit invisible until it timed out. The pid stamped into the
+    lock at creation says whose it is; only a deliberate steal ignores it.
+    """
+    if not force:
+        try:
+            with open(PENDING_LOCK, "r", encoding="utf-8") as fh:
+                if int(json.load(fh).get("pid", -1)) != os.getpid():
+                    return False
+        except (OSError, ValueError, TypeError):
+            pass                      # unreadable: the caller judged it stale
     for path in (PENDING_PATH, PENDING_LOCK):
         try:
             os.unlink(path)
         except OSError:
             pass
+    return True
 
 
 def _lock_expiry():
@@ -350,10 +377,10 @@ def _acquire_pending_slot(deadline, expires):
                 except OSError:
                     continue                      # vanished; try to claim it
                 if stale:
-                    _clear_pending()
+                    _clear_pending(force=True)
                     continue
             elif held < now():
-                _clear_pending()                  # holder timed out or died
+                _clear_pending(force=True)        # holder timed out or died
                 continue
             if time.time() > deadline:
                 return False
@@ -397,15 +424,22 @@ def request_approval(agent_name, tool, summary, detail):
             time.sleep(0.15)
         return False, "no answer within %ds" % ASK_TIMEOUT_SECONDS
     finally:
-        dismiss_notification(ASK_HEADLINE)
+        # Release before dismissing, and dismiss only if the slot was still
+        # ours: the prompt is identified by a shared headline, so clearing it
+        # after another agent has taken over would wipe their prompt instead.
+        still_ours = _clear_pending()
+        if still_ours:
+            dismiss_notification(ASK_HEADLINE)
         try:
             os.unlink(answer_path)
         except OSError:
             pass
-        _clear_pending()
 
 
-REQUEST_ID_RE = re.compile(r"^\d{1,10}-\d{1,16}$")
+# Explicitly ASCII: \d also matches Arabic-Indic and other Unicode digits, and
+# `$` would allow a trailing newline. Neither could escape the directory, but
+# the id is minted as <pid>-<ms> and the check should say exactly that.
+REQUEST_ID_RE = re.compile(r"[0-9]{1,10}-[0-9]{1,16}\Z")
 
 
 def decision_path(request_id):
@@ -419,7 +453,7 @@ def decision_path(request_id):
     basename, so neither traversal nor an absolute path can survive.
     """
     request_id = str(request_id)
-    if not REQUEST_ID_RE.match(request_id):
+    if not REQUEST_ID_RE.fullmatch(request_id):
         raise ToolError("malformed request id")
     return os.path.join(DECISION_DIR, os.path.basename(request_id) + ".json")
 
@@ -525,7 +559,8 @@ def clean_label(value, fallback, limit=64):
     single-line log format, and a leading dash could be read as an option by a
     command this name is interpolated into.
     """
-    text = re.sub(r"[\x00-\x1f\x7f]", " ", str(value or "")).strip()
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]",
+                  " ", str(value or "")).strip()
     text = re.sub(r"\s+", " ", text).lstrip("-").strip()
     if not text:
         return fallback
@@ -1239,7 +1274,7 @@ def sweep_stale_state():
     try:
         expiry = _lock_expiry()
         if expiry is not None and expiry < now():
-            _clear_pending()
+            _clear_pending(force=True)
     except OSError:
         pass
     try:
@@ -1386,15 +1421,26 @@ class Server:
             self.calls += 1
             self.touch()
             try:
-                payload = call_tool(name, arguments, self.agent_name)
+                answer = {"content": content_for(call_tool(name, arguments, self.agent_name))}
             except ToolError as exc:
-                self.reply(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
+                answer = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
             except Exception as exc:                       # noqa: BLE001 - one call must not end the session
-                self.reply(request_id, {"content": [{"type": "text",
-                                                     "text": "%s: %s" % (type(exc).__name__, exc)}],
-                                        "isError": True})
-            else:
-                self.reply(request_id, {"content": content_for(payload)})
+                answer = {"content": [{"type": "text",
+                                       "text": "%s: %s" % (type(exc).__name__, exc)}], "isError": True}
+            try:
+                self.reply(request_id, answer)
+            except OSError:
+                # The client's pipe is gone. Returning here would leave the
+                # process alive and still heartbeating, accepting calls into a
+                # queue nothing drains — a server that looks connected and
+                # answers nothing. End the session instead, the way a failed
+                # write on the read loop already does.
+                self.stop.set()
+                try:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                except OSError:
+                    pass
+                return
 
     def handle(self, message):
         method = message.get("method")
@@ -1464,6 +1510,11 @@ class Server:
         finally:
             self.stop.set()
             self.work.put(None)
+            # The worker is a daemon thread, so a signal during a parked
+            # approval kills it without running its own cleanup. Release the
+            # slot here if it is still ours, or it stays held — blocking every
+            # other agent and leaving a prompt on screen for a dead server.
+            _clear_pending()
             if self.registered:
                 log_activity({"agent": self.agent_name, "tool": "disconnect", "state": "ok",
                               "summary": "%s disconnected" % self.agent_name})
@@ -1574,7 +1625,7 @@ def cmd_decide(argv):
     if len(argv) < 2 or argv[1] not in (ALLOW, DENY):
         print("usage: omcp decide <id> <allow|deny>", file=sys.stderr)
         return 2
-    if not REQUEST_ID_RE.match(str(argv[0])):
+    if not REQUEST_ID_RE.fullmatch(str(argv[0])):
         print("not a request id: %r" % argv[0], file=sys.stderr)
         return 2
     write_decision(argv[0], argv[1])
