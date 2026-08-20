@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OMCP — your desktop, as an MCP server</title>
+<meta name="description" content="OMCP gives AI agents fixed, visible, revocable control of your Omarchy desktop. 32 tools, per-tool permissions, and no run-command escape hatch.">
+<link rel="canonical" href="https://omcp.app/">
+<meta name="theme-color" content="#0d1117">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="OMCP">
+<meta property="og:url" content="https://omcp.app/">
+<meta property="og:title" content="OMCP — your desktop, as an MCP server">
+<meta property="og:description" content="Your agent drives it — and you watch it happen.">
+<meta property="og:image" content="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/preview.png">
+<meta property="og:image:width" content="1600">
+<meta property="og:image:height" content="900">
+<meta property="og:image:alt" content="The OMCP activity panel open on a dark Omarchy desktop">
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="OMCP — your desktop, as an MCP server">
+<meta name="twitter:description" content="Your agent drives it — and you watch it happen.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/preview.png">
+<style>
+  :root {
+    --bg: #0b0b0b;
+    --panel: #111;
+    --line: #292929;
+    --fg: #c8c8c8;
+    --dim: #777;
+    --faint: #505050;
+    --accent: #f0a000;
+    --urgent: #cf5c5c;
+    --mono: ui-monospace, "JetBrainsMono Nerd Font", "JetBrains Mono", SFMono-Regular,
+            Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 15px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 0 24px; }
+  a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+  }
+  a:hover { border-bottom-color: currentColor; }
+  a:focus-visible { outline: 1px solid var(--accent); outline-offset: 4px; }
+  ::selection { background: var(--accent); color: var(--bg); }
+  strong { color: #eef1f3; }
+
+  header { padding: 56px 0 48px; }
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 38px;
+  }
+  .mark { color: var(--dim); font-size: 13px; }
+  .mark b { color: var(--accent); font-weight: 700; }
+  .button {
+    color: var(--dim);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .button::before { content: "["; color: var(--faint); }
+  .button::after { content: "]"; color: var(--faint); }
+  .button:hover { color: var(--accent); }
+  h1 {
+    margin: 0;
+    overflow: hidden;
+    color: #e6e6e6;
+    font-size: clamp(7px, 1.65vw, 13px);
+    font-weight: 700;
+    line-height: 1.05;
+    letter-spacing: 0;
+    white-space: pre;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .cursor { color: var(--accent); }
+  .lede {
+    max-width: 65ch;
+    margin: 24px 0 0;
+    color: var(--dim);
+    font-size: 15px;
+  }
+  .lede strong { color: var(--fg); }
+
+  section { padding: 48px 0; border-top: 1px solid var(--line); }
+  h2 {
+    margin: 0 0 22px;
+    color: var(--dim);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  h2::before { content: "## "; color: var(--accent); }
+  h3 { margin: 0 0 9px; font-size: 18px; line-height: 1.4; }
+  p { max-width: 68ch; margin: 0 0 16px; }
+  code {
+    padding: 1px 6px;
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    background: var(--panel);
+    font-size: .92em;
+  }
+  pre {
+    margin: 26px 0;
+    padding: 18px 20px;
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--panel);
+    font: 14px/1.85 var(--mono);
+  }
+  pre code { padding: 0; border: 0; background: none; font-size: inherit; }
+  .prompt { color: var(--accent); }
+  .comment { color: var(--faint); }
+  .install { margin-bottom: 12px; }
+  .connect { margin-top: 12px; }
+
+  figure { margin: 28px 0 0; }
+  .shot {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--panel);
+  }
+  .zoom { display: block; border: 0; }
+  .zoom:hover { border: 0; }
+  .zoom:hover .shot { border-color: var(--accent); }
+  figcaption { margin-top: 10px; color: var(--dim); font-size: 12px; }
+  .hero-demo { margin-top: 34px; }
+  .ghosts { margin-top: 26px; }
+
+  .facts {
+    margin: 24px 0 0;
+    padding: 11px 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    color: var(--dim);
+    font-size: 13px;
+  }
+  .facts b { color: var(--fg); }
+  .facts .sep { padding: 0 9px; color: var(--faint); }
+
+  .feature {
+    padding: 34px 0 44px;
+    border-top: 1px solid var(--line);
+  }
+  .feature:first-of-type { padding-top: 0; border-top: 0; }
+  .feature p { color: var(--dim); }
+  .feature figure { max-width: 430px; margin: 24px 0 0; }
+  .feature h3::before { content: "> "; color: var(--accent); }
+
+  .approval-rule {
+    margin: 2px 0 0;
+    padding: 20px 0 0;
+    border-top: 1px solid var(--line);
+    color: var(--fg);
+  }
+  .approval-rule::before { content: "# approval rule"; display: block; margin-bottom: 8px; color: var(--urgent); font-size: 12px; }
+  .approval-rule small { display: block; margin-top: 8px; color: var(--dim); font-size: 12px; }
+
+  .tool-groups { margin: 4px 0 0; border-top: 1px solid var(--line); }
+  .tool-groups div {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 24px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .tool-groups dt { color: var(--fg); }
+  .tool-groups dd { margin: 0; color: var(--dim); }
+  .fixed-verbs { margin-top: 24px; }
+
+  .tries { list-style: none; margin: 24px 0 0; padding: 0; }
+  .tries li {
+    padding: 13px 0;
+    border-top: 1px solid var(--line);
+    color: var(--fg);
+  }
+  .tries li:last-child { border-bottom: 1px solid var(--line); }
+  .tries li::before { content: "> "; color: var(--accent); }
+
+  .security { list-style: none; margin: 0; padding: 0; }
+  .security li { margin: 0; padding: 18px 0; border-top: 1px solid var(--line); }
+  .security li:first-child { border-top: 0; padding-top: 0; }
+  .security p { margin: 6px 0 0; color: var(--dim); }
+
+  footer {
+    padding: 42px 0 72px;
+    border-top: 1px solid var(--line);
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .footer-row { display: flex; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
+
+  @media (max-width: 680px) {
+    header { padding-top: 36px; }
+    section { padding: 40px 0; }
+    .tool-groups div { grid-template-columns: 1fr; gap: 3px; }
+  }
+  @media (max-width: 460px) {
+    .wrap { padding: 0 18px; }
+    pre { margin-left: -6px; margin-right: -6px; padding: 15px; font-size: 12px; }
+    .facts .sep { display: none; }
+    .facts span { display: block; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="topbar">
+    <div class="mark"><b>omcp</b> / omarchy quattro</div>
+    <a class="button" href="https://github.com/tsouth89/omarchy-omcp">source</a>
+  </div>
+
+  <h1><span aria-hidden="true"> ██████╗ ███╗   ███╗ ██████╗██████╗
+██╔═══██╗████╗ ████║██╔════╝██╔══██╗
+██║   ██║██╔████╔██║██║     ██████╔╝
+██║   ██║██║╚██╔╝██║██║     ██╔═══╝
+╚██████╔╝██║ ╚═╝ ██║╚██████╗██║<span class="cursor"> █</span>
+ ╚═════╝ ╚═╝     ╚═╝ ╚═════╝╚═╝</span><span class="sr-only">OMCP</span></h1>
+  <p class="lede">
+    Your desktop, as an MCP server. Your agent drives it — and you watch it happen.
+    Fixed verbs, visible activity, and one switch that stops everything.
+  </p>
+
+  <figure class="hero-demo">
+    <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/demo.gif" target="_blank" rel="noopener">
+      <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/demo.gif"
+           width="1150" height="360" fetchpriority="high" decoding="async" alt="A prompt changes the desktop theme, volume, do-not-disturb state, and sends a notification while OMCP records each action">
+    </a>
+    <figcaption>One prompt, four tool calls, no hands. Recorded in one take.</figcaption>
+  </figure>
+</header>
+
+<section id="install">
+  <h2>install</h2>
+  <pre class="install"><code><span class="prompt">$</span> omarchy plugin add https://github.com/tsouth89/omarchy-omcp --enable
+<span class="prompt">$</span> omarchy bar put tsouth89.omcp</code></pre>
+  <p>Then connect an agent:</p>
+  <pre class="connect"><code><span class="prompt">$</span> claude mcp add omcp -- ~/.config/omarchy/plugins/tsouth89.omcp/bin/omcp serve</code></pre>
+  <p>
+    One Python 3 file. Standard library only. No pip, no npm, no daemon, and
+    nothing installed outside the plugin checkout.
+  </p>
+  <div class="facts" aria-label="OMCP at a glance">
+    <span><b>32 tools</b> / 12 reads / 20 writes</span><span class="sep">·</span>
+    <span><b>5</b> ask by default</span><span class="sep">·</span>
+    <span><b>0</b> dependencies</span>
+  </div>
+</section>
+
+<section>
+  <h2>the missing half</h2>
+  <p>
+    Agents can already edit your files and run your builds. They cannot touch
+    the desktop those things live in. OMCP closes that gap, and then does the
+    part that actually matters: it makes the agent's reach
+    <strong>visible and revocable.</strong>
+  </p>
+  <figure class="ghosts">
+    <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/ghost-states.png" target="_blank" rel="noopener">
+      <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/ghost-states.png"
+           width="1168" height="214" loading="lazy" decoding="async" alt="The four OMCP status bar states: no agent, connected, waiting on you, and paused">
+    </a>
+    <figcaption>The ghost always tells you where you stand.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>control you can see</h2>
+
+  <div class="feature">
+    <h3>watch it happen</h3>
+    <p>
+      The activity feed is the product. Every call lands in plain language:
+      “set the theme to Tokyo Night”, “turned do not disturb on” — including
+      what was refused.
+    </p>
+    <figure>
+      <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/panel.png" target="_blank" rel="noopener">
+        <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/panel.png"
+             width="481" height="517" loading="lazy" decoding="async" alt="OMCP activity feed showing a connected Claude Code agent and its recent calls">
+      </a>
+    </figure>
+  </div>
+
+  <div class="feature">
+    <h3>allow / ask / off</h3>
+    <p><strong>Allow</strong> runs. <strong>Ask</strong> parks the call mid-flight and waits for you. <strong>Off</strong> removes the tool from the agent's tool list; it cannot discover that the tool exists.</p>
+    <p>Five sensitive actions ship as Ask. You get 60 seconds. No answer means denied.</p>
+    <figure>
+      <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/permissions.png" target="_blank" rel="noopener">
+        <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/permissions.png"
+             width="481" height="716" loading="lazy" decoding="async" alt="OMCP permissions list with Allow and Ask states">
+      </a>
+    </figure>
+  </div>
+
+  <div class="feature">
+    <h3>stop everything</h3>
+    <p>
+      One control halts everything, including reads. A stop control that still
+      let an agent read your screen would not be a stop control.
+    </p>
+    <figure>
+      <a class="zoom" href="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/approval.png" target="_blank" rel="noopener">
+        <img class="shot" src="https://raw.githubusercontent.com/tsouth89/omarchy-omcp/main/docs/approval.png"
+             width="481" height="605" loading="lazy" decoding="async" alt="OMCP holding an agent request to launch Obsidian for human approval">
+      </a>
+    </figure>
+  </div>
+
+  <p class="approval-rule">
+    An agent must never be able to make the next key you press mean “yes.”
+    <small>
+      The panel deliberately does not open itself for an approval. Taking keyboard
+      focus on the agent's schedule would make approval one accidental keystroke away.
+    </small>
+  </p>
+</section>
+
+<section>
+  <h2>32 tools / fixed verbs only</h2>
+  <dl class="tool-groups">
+    <div>
+      <dt>Windows &amp; workspaces</dt>
+      <dd>inspect, focus, move, switch, float, fullscreen, close</dd>
+    </div>
+    <div>
+      <dt>Appearance</dt>
+      <dd>themes, wallpaper, brightness, night light</dd>
+    </div>
+    <div>
+      <dt>Attention &amp; notifications</dt>
+      <dd>do not disturb, reminders, desktop notifications</dd>
+    </div>
+    <div>
+      <dt>System</dt>
+      <dd>volume, power profile, stay awake, weather, network</dd>
+    </div>
+    <div>
+      <dt>Capture &amp; clipboard</dt>
+      <dd>screenshots, clipboard read and write</dd>
+    </div>
+  </dl>
+  <p class="fixed-verbs">
+    Every tool is a fixed verb over a command Omarchy already ships:
+    <code>hyprctl</code>, <code>omarchy</code>, <code>grim</code>,
+    <code>wpctl</code>, <code>wl-copy</code>, <code>gio</code>.
+    <strong>There is no <code>run_command</code> tool, and there never will be.</strong>
+  </p>
+</section>
+
+<section>
+  <h2>prompts to try</h2>
+  <p>Start with a plain-language request and let the agent choose the fixed tools it needs.</p>
+  <ul class="tries">
+    <li>Set my desktop up for a screencast</li>
+    <li>What's on my screen right now?</li>
+    <li>Someone's coming over — mute everything and lock</li>
+  </ul>
+</section>
+
+<section>
+  <h2>security, in plain language</h2>
+  <ul class="security">
+    <li>
+      <strong>Screenshots and clipboard contents are untrusted input.</strong>
+      <p>
+        Text visible on your screen can enter the agent's context. OMCP tells
+        agents to treat it as data, never instructions, but that is defence in
+        depth — not a guarantee.
+      </p>
+    </li>
+    <li>
+      <strong>An agent's name identifies; it does not authenticate.</strong>
+      <p>
+        The client supplies its own name during the MCP handshake. An unexpected
+        connection notification is the signal that matters.
+      </p>
+    </li>
+    <li>
+      <strong>Everything is logged, including refusals.</strong>
+      <p>
+        Activity stays on your machine under <code>~/.local/state/omcp/</code>.
+        Permissions and the stop switch live under <code>~/.config/omcp/</code>.
+      </p>
+    </li>
+  </ul>
+  <p>
+    Read the full <a href="https://github.com/tsouth89/omarchy-omcp#security">security notes and threat boundaries</a>
+    before giving an agent desktop control.
+  </p>
+</section>
+
+<footer>
+  <div class="footer-row">
+    <span>
+      <a href="https://github.com/tsouth89/omarchy-omcp">github.com/tsouth89/omarchy-omcp</a>
+      · MIT · for <a href="https://omarchy.org">Omarchy</a>
+    </span>
+    <span>Made by the <a href="https://toolport.app">Toolport</a> team.</span>
+  </div>
+</footer>
+
+</div>
+</body>
+</html>
