@@ -111,7 +111,7 @@ Item {
     printErrors: false
     onLoaded: root.applyAgents(text())
     onFileChanged: reload()
-    onLoadFailed: root.agents = []
+    onLoadFailed: root.agentsRaw = []
   }
 
   // An agent that was killed rather than closed never gets to remove itself, so
@@ -142,6 +142,7 @@ Item {
     var head = next.length > 0 ? next[0] : null
     var changed = head && (activity.length === 0
       || head.ts !== activity[0].ts || head.tool !== activity[0].tool
+      || head.state !== activity[0].state || head.summary !== activity[0].summary
       || next.length !== activity.length)
     // Reassigning the array resets the Repeater and rebuilds every delegate, so
     // only do it when the contents actually moved. The backstop reload fires on

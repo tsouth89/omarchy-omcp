@@ -133,8 +133,11 @@ is on.
 
 ## Keyboard and IPC
 
-In the panel: `←/→` tabs, `↑/↓` rows, `Enter` activates, `a`/`d` approve or deny, `p` pause,
-`l`/`t`/`c` jump to Activity / Permissions / Connect.
+In the panel: `←/→` tabs, `↑/↓` rows, `Enter` activates, `p` pause, and `f`/`t`/`c` jump to
+Activity / Permissions / Connect.
+
+`a` and `d` approve or deny a held request, but only once you have moved the cursor into the panel
+with an arrow key — see [Ask, in practice](#ask-in-practice) for why.
 
 ```bash
 omarchy-shell omcp toggle              # open or close the panel

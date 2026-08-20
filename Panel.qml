@@ -81,8 +81,20 @@ Panel {
   // user had already decided on could answer a request they had not read. Track
   // the row by identity and drop the cursor entirely when its row disappears.
   property string anchoredRowId: ""
-  onCurrentRowIdChanged: if (currentRowId !== "") anchoredRowId = currentRowId
 
+  // Every deliberate cursor move goes through here, and nothing else writes the
+  // anchor. Deriving it from currentRowId instead made correctness depend on
+  // whether Qt refreshed the binding or ran onRowsChanged first: in the other
+  // order the anchor would follow the reshaped list onto Approve, which is the
+  // hazard the anchoring exists to prevent.
+  function setCursor(index) {
+    cursor = Math.max(0, Math.min(Math.max(0, rows.length - 1), index))
+    anchoredRowId = (cursor >= 0 && cursor < rows.length) ? rows[cursor].id : ""
+  }
+
+  // Keep the highlight on whatever row it was on when the list reshapes. If
+  // that row is gone, drop the cursor rather than let it point at whatever
+  // slid into its place.
   function reanchorCursor() {
     if (!cursorActive) return
     for (var i = 0; i < rows.length; i++) {
@@ -90,6 +102,7 @@ Panel {
     }
     cursorActive = false
     cursor = 0
+    anchoredRowId = ""
   }
 
   onRowsChanged: reanchorCursor()
@@ -100,11 +113,11 @@ Panel {
     cursorActive = true
     if (dx !== 0) {
       var t = tabs.indexOf(tab) + dx
-      if (t >= 0 && t < tabs.length) { tab = tabs[t]; cursor = 0 }
+      if (t >= 0 && t < tabs.length) { tab = tabs[t]; setCursor(0) }
       return
     }
     if (dy === 0) return
-    cursor = Math.max(0, Math.min(rows.length - 1, cursor + dy))
+    setCursor(cursor + dy)
   }
 
   function activate() {
@@ -195,7 +208,7 @@ Panel {
     function openTab(name: string): string {
       if (root.tabs.indexOf(name) < 0) return "unknown tab: " + name
       root.tab = name
-      root.cursor = 0
+      root.setCursor(0)
       root.cursorActive = false
       root.open()
       return "ok"
@@ -300,11 +313,11 @@ Panel {
         if (key === "a" && engine.awaitingApproval && root.cursorActive) root.trigger("approve")
         else if (key === "d" && engine.awaitingApproval && root.cursorActive) root.trigger("deny")
         else if (key === "p") root.trigger("pause")
-        else if (key === "c") { root.tab = "connect"; root.cursor = 0 }
-        else if (key === "t") { root.tab = "tools"; root.cursor = 0 }
+        else if (key === "c") { root.tab = "connect"; root.setCursor(0) }
+        else if (key === "t") { root.tab = "tools"; root.setCursor(0) }
         // `f` rather than `l`: PanelKeyCatcher eats l/h/j/k as vim motion keys
         // and never emits them here.
-        else if (key === "f") { root.tab = "activity"; root.cursor = 0 }
+        else if (key === "f") { root.tab = "activity"; root.setCursor(0) }
       }
 
       Flickable {
@@ -644,7 +657,7 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onClicked: { root.tab = tabButton.tabId; root.cursor = 0; root.cursorActive = false }
+      onClicked: { root.tab = tabButton.tabId; root.setCursor(0); root.cursorActive = false }
     }
 
     Text {
@@ -676,7 +689,7 @@ Panel {
       onEntered: {
         root.cursorActive = true
         for (var i = 0; i < root.rows.length; i++)
-          if (root.rows[i].id === askButton.rowId) root.cursor = i
+          if (root.rows[i].id === askButton.rowId) root.setCursor(i)
       }
       onClicked: root.trigger(askButton.rowId)
     }
@@ -711,7 +724,7 @@ Panel {
       onEntered: {
         root.cursorActive = true
         for (var i = 0; i < root.rows.length; i++)
-          if (root.rows[i].id === actionRow.rowId) root.cursor = i
+          if (root.rows[i].id === actionRow.rowId) root.setCursor(i)
       }
       onClicked: root.trigger(actionRow.rowId)
     }
@@ -787,7 +800,7 @@ Panel {
       onEntered: {
         root.cursorActive = true
         for (var i = 0; i < root.rows.length; i++)
-          if (root.rows[i].id === "tool:" + toolRow.toolName) root.cursor = i
+          if (root.rows[i].id === "tool:" + toolRow.toolName) root.setCursor(i)
       }
       onClicked: root.trigger("tool:" + toolRow.toolName)
     }
