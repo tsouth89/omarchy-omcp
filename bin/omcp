@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 PROTOCOL_DEFAULT = "2025-06-18"
 SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", "2025-06-18")
 
@@ -191,25 +191,100 @@ def read_json(path, fallback):
 # --------------------------------------------------------------------- config
 #
 # Three permission states per tool. `allow` runs it, `ask` holds it until the
-# user answers in the panel, `deny` refuses without running anything. Defaults
-# live in the tool catalogue, not on disk, so a plugin update can introduce a
-# tool without silently granting it: the stored file only carries overrides.
+# user answers in the panel, `deny` refuses without running anything. Fresh
+# installs begin with catalogue defaults; once a config exists it stores a
+# complete reviewed map, so an update cannot silently grant a newly added tool.
 
 ALLOW, ASK, DENY = "allow", "ask", "deny"
+PROFILE_NAMES = ("observe", "present", "operate")
+
+# Named profiles are deliberately derived from capability classes here, in the
+# server that enforces them. The QML panel only asks for a profile by name; it
+# never owns a second permission map that could drift away from this one.
+PRESENT_TOOLS = {
+    "set_theme", "set_wallpaper", "send_notification", "focus_window",
+    "move_window_to_workspace", "switch_workspace", "set_volume",
+    "set_brightness", "set_do_not_disturb", "set_night_light",
+    "set_reminder", "set_power_profile", "set_stay_awake",
+    "set_window_floating", "set_window_fullscreen",
+}
+SENSITIVE_READS = {"screenshot", "read_clipboard"}
+REVIEWED_READS = {
+    "get_active_window", "list_windows", "list_workspaces",
+    "get_current_theme", "list_themes", "list_apps", "get_system_stats",
+    "list_monitors", "get_weather", "get_network_status",
+}
 
 
 def default_permissions():
     return {name: spec["default"] for name, spec in TOOLS.items()}
 
 
+def profile_permissions(profile):
+    """Return the complete permission map for a named profile.
+
+    New tools fail closed in Observe and Present: reads require approval and
+    writes stay Off until the profile definition deliberately includes them.
+    Operate tracks the reviewed catalogue defaults.
+    """
+    if profile not in PROFILE_NAMES:
+        raise ValueError("unknown profile: %s" % profile)
+    if profile == "operate":
+        return default_permissions()
+    permissions = {}
+    for name, spec in TOOLS.items():
+        if profile == "observe":
+            if spec["write"]:
+                permissions[name] = DENY
+            elif name in REVIEWED_READS:
+                permissions[name] = ALLOW
+            else:
+                permissions[name] = ASK
+        elif name in PRESENT_TOOLS:
+            permissions[name] = ALLOW
+        elif spec["write"]:
+            permissions[name] = DENY
+        elif name in REVIEWED_READS:
+            permissions[name] = ALLOW
+        else:
+            permissions[name] = ASK
+    return permissions
+
+
+def detect_profile(permissions):
+    for profile in PROFILE_NAMES:
+        if permissions == profile_permissions(profile):
+            return profile
+    return "custom"
+
+
 def load_config():
-    stored = read_json(CONFIG_PATH, {})
-    perms = default_permissions()
+    exists = os.path.exists(CONFIG_PATH)
+    stored = read_json(CONFIG_PATH, None)
+    if not isinstance(stored, dict):
+        stored = {}
+    declared_profile = stored.get("profile")
+    if not exists:
+        # A genuinely fresh install gets the reviewed shipping defaults.
+        perms = default_permissions()
+    elif declared_profile in PROFILE_NAMES:
+        # A profile remains a policy across upgrades. Any newly introduced tool
+        # receives that profile's fail-closed classification rather than its
+        # catalogue default.
+        perms = profile_permissions(declared_profile)
+    else:
+        # Existing custom and legacy configs preserve every stored choice, but
+        # a tool they have never seen must be reviewed before it can run.
+        perms = {name: ASK for name in TOOLS}
     for name, value in (stored.get("tools") or {}).items():
         if name in perms and value in (ALLOW, ASK, DENY):
             perms[name] = value
+    profile = declared_profile
+    if profile not in PROFILE_NAMES or perms != profile_permissions(profile):
+        profile = detect_profile(perms)
     return {
         "version": 1,
+        "profile": profile,
         "paused": bool(stored.get("paused", False)),
         "tools": perms,
         "notifyOnConnect": bool(stored.get("notifyOnConnect", True)),
@@ -217,11 +292,13 @@ def load_config():
 
 
 def save_config(config):
+    permissions = config.get("tools", {})
     write_atomic(CONFIG_PATH, json.dumps({
         "version": 1,
+        "profile": detect_profile(permissions),
         "paused": bool(config.get("paused", False)),
         "notifyOnConnect": bool(config.get("notifyOnConnect", True)),
-        "tools": config.get("tools", {}),
+        "tools": permissions,
     }, indent=2) + "\n")
 
 
@@ -1968,6 +2045,7 @@ USAGE = """omcp — the Omarchy desktop as an MCP server
   omcp tools [--json]              Every tool and the permission it currently has
 
   omcp set <tool> <allow|ask|deny> Change one tool's permission
+  omcp profile [name]              Show or apply observe, present, or operate
   omcp reset                       Put every permission back to its default
   omcp pause [on|off|toggle]       The stop switch. While paused, nothing runs.
   omcp notify [on|off]             Notify when an agent connects
@@ -1983,10 +2061,11 @@ def cmd_status(argv):
     agents = live_agents()
     recent = read_activity(20)
     if "--json" in argv:
-        print(json.dumps({"paused": config["paused"], "agents": agents,
+        print(json.dumps({"paused": config["paused"], "profile": config["profile"], "agents": agents,
                           "tools": config["tools"], "recent": recent}, indent=2))
         return 0
-    print("OMCP %s — %s" % (VERSION, "PAUSED" if config["paused"] else "armed"))
+    print("OMCP %s — %s — %s profile" % (
+        VERSION, "PAUSED" if config["paused"] else "armed", config["profile"]))
     print("")
     if agents:
         for agent in agents:
@@ -2007,14 +2086,18 @@ def cmd_tools(argv):
     if "--json" in argv:
         # The panel renders its permission list from this, so the catalogue
         # never has to be restated in QML and cannot drift out of sync.
-        print(json.dumps({"tools": [{
+        print(json.dumps({
+            "profile": config["profile"],
+            "profiles": {name: profile_permissions(name) for name in PROFILE_NAMES},
+            "tools": [{
             "name": name,
             "title": TOOLS[name]["title"],
             "description": TOOLS[name]["description"],
             "write": TOOLS[name]["write"],
             "default": TOOLS[name]["default"],
             "permission": config["tools"].get(name, TOOLS[name]["default"]),
-        } for name in sorted(TOOLS, key=lambda n: (TOOLS[n]["write"], n))]}, indent=2))
+            } for name in sorted(TOOLS, key=lambda n: (TOOLS[n]["write"], n))],
+        }, indent=2))
         return 0
     for name in sorted(TOOLS):
         spec = TOOLS[name]
@@ -2038,6 +2121,22 @@ def cmd_set(argv):
         config["tools"][name] = state
     mutate_config(apply)
     print("%s: %s" % (name, state))
+    return 0
+
+
+def cmd_profile(argv):
+    config = load_config()
+    if not argv:
+        print(config["profile"])
+        return 0
+    profile = argv[0].lower()
+    if profile not in PROFILE_NAMES:
+        print("profile must be observe, present or operate", file=sys.stderr)
+        return 2
+    def apply(next_config):
+        next_config["tools"] = profile_permissions(profile)
+    mutate_config(apply)
+    print("profile: %s" % profile)
     return 0
 
 
@@ -2122,7 +2221,7 @@ def cmd_reset(argv):
     def apply(config):
         config["tools"] = default_permissions()
     mutate_config(apply)
-    print("permissions reset to defaults")
+    print("permissions reset to operate profile")
     return 0
 
 
@@ -2189,6 +2288,7 @@ def cmd_doctor(argv):
     config = load_config()
     asks = [n for n, s in config["tools"].items() if s == ASK]
     denies = [n for n, s in config["tools"].items() if s == DENY]
+    print("  profile     %s" % config["profile"])
     print("  permissions %d allow, %d ask, %d off" % (len(TOOLS) - len(asks) - len(denies), len(asks), len(denies)))
     print("  kill switch %s" % ("PAUSED" if config["paused"] else "armed"))
     print("")
@@ -2215,7 +2315,8 @@ def main(argv):
         Server().serve()
         return 0
     handlers = {
-        "status": cmd_status, "tools": cmd_tools, "set": cmd_set, "pause": cmd_pause,
+        "status": cmd_status, "tools": cmd_tools, "set": cmd_set, "profile": cmd_profile,
+        "pause": cmd_pause,
         "decide": cmd_decide, "mcp-config": cmd_mcp_config, "doctor": cmd_doctor,
         "log": cmd_log, "reset": cmd_reset, "notify": cmd_notify, "test": cmd_test,
     }

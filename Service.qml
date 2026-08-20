@@ -40,6 +40,8 @@ Item {
 
   // ------------------------------------------------------------------ state
   property bool paused: false
+  property string profile: "operate"
+  property string catalogProfile: "operate"
   property var permissions: ({})
   property var agentsRaw: []
   // Derived, not stored: a SIGKILLed agent never rewrites the registry, so if
@@ -54,6 +56,7 @@ Item {
   property var activity: []
   property var pending: null
   property var catalog: []
+  property var profilePermissions: ({})
   property int now: Math.floor(Date.now() / 1000)
   property int feedLength: 40
 
@@ -73,18 +76,17 @@ Item {
     : "no agent connected"
 
   signal activityArrived(string tool, string state)
+  signal commandFinished(var args, bool succeeded)
 
-  // The config file only stores overrides, so a tool the user has never touched
-  // has no entry — its real permission is the default the server ships for it.
-  // Falling back to a blanket "allow" here would have the panel claim a gated
-  // tool was wide open while the server was still holding it for approval.
   // What the user just asked for, shown immediately and dropped as soon as the
   // config file confirms it. Without this the badge and the switch only move
   // once the CLI has written and inotify has fired.
   property var desiredPermissions: ({})
   property var desiredPaused: null
+  property string desiredProfile: ""
 
   readonly property bool pausedShown: desiredPaused !== null ? desiredPaused : paused
+  readonly property string profileShown: desiredProfile !== "" ? desiredProfile : profile
 
   function permissionFor(name) {
     if (desiredPermissions[name] !== undefined) return desiredPermissions[name]
@@ -112,9 +114,17 @@ Item {
       var config = JSON.parse(raw || "{}")
       paused = !!config.paused
       permissions = config.tools || ({})
+      // Older config files predate named profiles. The CLI catalogue below
+      // performs the authoritative inference from their permission map.
+      profile = config.profile || catalogProfile
     } catch (e) {
       paused = false
-      permissions = ({})
+      profile = "custom"
+      // Match the server's fail-closed treatment of an existing malformed
+      // config instead of falling through to permissive catalogue defaults.
+      var gated = {}
+      for (var i = 0; i < catalog.length; i++) gated[catalog[i].name] = "ask"
+      permissions = gated
     }
     // The file is the truth again; drop every overlay it has caught up with.
     if (desiredPaused !== null && desiredPaused === paused) desiredPaused = null
@@ -122,6 +132,7 @@ Item {
     for (var k in desiredPermissions)
       if (permissions[k] !== desiredPermissions[k]) pending[k] = desiredPermissions[k]
     desiredPermissions = pending
+    if (desiredProfile !== "" && desiredProfile === profile) desiredProfile = ""
   }
 
   FileView {
@@ -228,7 +239,18 @@ Item {
     for (var k in desiredPermissions) next[k] = desiredPermissions[k]
     next[name] = value
     desiredPermissions = next
+    desiredProfile = "custom"
     runCli(["set", name, value])
+  }
+
+  function setProfile(name) {
+    if (["observe", "present", "operate"].indexOf(name) < 0) return
+    desiredProfile = name
+    var next = {}
+    var template = profilePermissions[name] || ({})
+    for (var key in template) next[key] = template[key]
+    desiredPermissions = next
+    runCli(["profile", name])
   }
 
   function togglePause() { setPaused(!pausedShown) }
@@ -240,11 +262,45 @@ Item {
   function approve() { if (pending) { runCli(["decide", pending.id, "allow"]); pending = null } }
   function deny() { if (pending) { runCli(["decide", pending.id, "deny"]); pending = null } }
 
-  // Detached, not a shared Process object: assigning `running = true` while the
-  // previous call was still going was a silent no-op, so approving and then
-  // immediately pausing would drop the pause.
+  // Configuration writes are serialized. Separate detached processes could
+  // acquire the file lock in a different order than the user's clicks, making
+  // a rapid profile → tool or profile → profile change finish backwards.
+  property var cliQueue: []
+  property var activeCliArgs: []
+
   function runCli(args) {
-    Quickshell.execDetached([cli].concat(args))
+    var next = cliQueue.slice()
+    next.push(args)
+    cliQueue = next
+    pumpCli()
+  }
+
+  function pumpCli() {
+    if (cliProc.running || cliQueue.length === 0) return
+    var next = cliQueue.slice()
+    var args = next.shift()
+    cliQueue = next
+    activeCliArgs = args
+    cliProc.command = [cli].concat(args)
+    cliProc.running = true
+  }
+
+  Process {
+    id: cliProc
+    running: false
+    command: []
+    onExited: function(exitCode) {
+      var finished = root.activeCliArgs
+      root.activeCliArgs = []
+      if (exitCode !== 0) {
+        root.desiredPermissions = ({})
+        root.desiredProfile = ""
+        root.desiredPaused = null
+      }
+      root.commandFinished(finished, exitCode === 0)
+      root.reloadWatches()
+      Qt.callLater(root.pumpCli)
+    }
   }
 
   // The tool list is read once per shell session: it only changes when the
@@ -257,9 +313,14 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         try {
-          root.catalog = JSON.parse(text || "{}").tools || []
+          var response = JSON.parse(text || "{}")
+          root.catalog = response.tools || []
+          root.profilePermissions = response.profiles || ({})
+          if (response.profile) root.catalogProfile = response.profile
+          if (root.desiredProfile === "" && response.profile) root.profile = response.profile
         } catch (e) {
           root.catalog = []
+          root.profilePermissions = ({})
         }
         root.reloadWatches()
       }

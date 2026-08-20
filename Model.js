@@ -7,6 +7,13 @@ var PERMISSIONS = ["allow", "ask", "deny"]
 
 // What each permission promises, in the panel's own words.
 var PERMISSION_LABEL = { allow: "Allow", ask: "Ask", deny: "Off" }
+var PROFILE_LABEL = { observe: "Observe", present: "Present", operate: "Operate", custom: "Custom" }
+var PROFILE_DESCRIPTION = {
+  observe: "Read desktop state. Screenshots and clipboard reads still ask; every write is Off.",
+  present: "Arrange and tune the desktop. Starting apps, opening links, clipboard writes, closing windows, and locking stay Off.",
+  operate: "The reviewed defaults: most desktop actions run, while sensitive operations ask first.",
+  custom: "Your per-tool choices no longer match a built-in profile."
+}
 
 function nextPermission(current) {
   var i = PERMISSIONS.indexOf(current)
@@ -14,6 +21,8 @@ function nextPermission(current) {
 }
 
 function permissionLabel(value) { return PERMISSION_LABEL[value] || value }
+function profileLabel(value) { return PROFILE_LABEL[value] || value }
+function profileDescription(value) { return PROFILE_DESCRIPTION[value] || PROFILE_DESCRIPTION.custom }
 
 function clockTime(epochSeconds) {
   if (!epochSeconds) return ""

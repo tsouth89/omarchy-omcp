@@ -88,6 +88,17 @@ Every tool is one of three things, and you change it by clicking the row:
 | **Ask** | parks the call and waits for you to approve it in the panel |
 | **Off** | the tool is not even advertised to the agent — it cannot see that it exists |
 
+The Permissions tab also has three named starting points:
+
+| Profile | What it permits |
+|---|---|
+| **Observe** | Desktop-state reads; screenshots and clipboard reads still Ask, and every write is Off |
+| **Present** | Reads plus reviewed appearance, workspace, window-layout, notification, and power controls |
+| **Operate** | The shipping defaults described below, including Ask for sensitive operations |
+
+Changing an individual tool makes the active profile **Custom**. Applying a named profile shows
+and writes its complete permission map; it never hides extra grants behind the profile name.
+
 Ships as **Allow** except `read_clipboard`, `write_clipboard`, `launch_app`, `close_window`,
 and `lock_screen`, which ship as **Ask**. Clipboards hold passwords; starting a process,
 closing a window, or locking the session deserves a glance.
@@ -170,6 +181,7 @@ omarchy-shell omcp toggle              # open or close the panel
 omarchy-shell omcp openTab connect     # straight to a tab
 omarchy-shell omcp-service pause       # kill switch, from a keybind
 ~/.config/omarchy/plugins/tsouth89.omcp/bin/omcp status
+~/.config/omarchy/plugins/tsouth89.omcp/bin/omcp profile observe
 ~/.config/omarchy/plugins/tsouth89.omcp/bin/omcp set screenshot deny
 ~/.config/omarchy/plugins/tsouth89.omcp/bin/omcp pause on
 ```

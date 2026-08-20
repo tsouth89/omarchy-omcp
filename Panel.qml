@@ -78,6 +78,11 @@ Panel {
     if (tab === "activity") {
       out.push({ id: "pause" })
     } else if (tab === "tools") {
+      if (engine.catalog.length > 0) {
+        out.push({ id: "profile:observe" })
+        out.push({ id: "profile:present" })
+        out.push({ id: "profile:operate" })
+      }
       for (var i = 0; i < engine.catalog.length; i++)
         out.push({ id: "tool:" + engine.catalog[i].name })
     } else if (tab === "connect") {
@@ -174,6 +179,11 @@ Panel {
   }
 
   function trigger(id) {
+    if (id.indexOf("profile:") === 0) {
+      engine.setProfile(id.substring(8))
+      flash("Applying " + Model.profileLabel(id.substring(8)) + " profile…")
+      return
+    }
     if (id.indexOf("tool:") === 0) {
       var name = id.substring(5)
       // No catalog reload: titles and defaults are static, and the effective
@@ -233,6 +243,15 @@ Panel {
     id: engine
     panelOwned: true
     feedLength: root.feedLength
+
+    onCommandFinished: function(args, succeeded) {
+      var action = args && args.length > 0 ? args[0] : "change"
+      if (!succeeded) {
+        root.flash("Could not apply " + action + " — run doctor from Connect")
+      } else if (action === "profile" && args.length > 1) {
+        root.flash(Model.profileLabel(args[1]) + " profile applied")
+      }
+    }
 
     // Deliberately does NOT open the panel. This surface takes exclusive
     // keyboard focus, so summoning it the moment an agent asks would yank the
@@ -623,6 +642,37 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
+            PanelSectionHeader {
+              visible: engine.catalog.length > 0
+              text: "PROFILE · " + Model.profileLabel(engine.profileShown).toUpperCase()
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Row {
+              visible: engine.catalog.length > 0
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: ["observe", "present", "operate"]
+                ProfileChip {
+                  required property var modelData
+                  profileName: modelData
+                }
+              }
+            }
+
+            Text {
+              visible: engine.catalog.length > 0
+              width: parent.width
+              text: Model.profileDescription(engine.profileShown)
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
             Text {
               visible: engine.catalog.length === 0
               width: parent.width
@@ -800,6 +850,40 @@ Panel {
         font.pixelSize: Style.font.caption
         anchors.verticalCenter: askLabel.verticalCenter
       }
+    }
+  }
+
+  component ProfileChip: CursorSurface {
+    id: profileChip
+    property string profileName: ""
+    readonly property bool selected: engine.profileShown === profileName
+
+    hasCursor: root.hasCursor("profile:" + profileName)
+    current: selected
+    foreground: root.foreground
+    onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
+    implicitWidth: profileLabel.implicitWidth + Style.space(20)
+    implicitHeight: profileLabel.implicitHeight + Style.space(10)
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: {
+        root.keyboardNav = false
+        for (var i = 0; i < root.rows.length; i++)
+          if (root.rows[i].id === "profile:" + profileChip.profileName) root.setCursor(i)
+      }
+      onClicked: root.trigger("profile:" + profileChip.profileName)
+    }
+
+    Text {
+      id: profileLabel
+      anchors.centerIn: parent
+      text: Model.profileLabel(profileChip.profileName)
+      color: profileChip.selected ? root.accent : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
     }
   }
 
