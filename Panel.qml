@@ -92,6 +92,27 @@ Panel {
     anchoredRowId = (cursor >= 0 && cursor < rows.length) ? rows[cursor].id : ""
   }
 
+  // Keyboard navigation has to drag the view with it. Without this the cursor
+  // walks off the bottom of the visible area and the highlight is simply gone:
+  // the Permissions tab is taller than the panel, so arrowing into the WRITES
+  // section left the user staring at READS with no cursor in sight.
+  // Only the keyboard scrolls the view. Hover sets the cursor too, and a pointer
+  // drifting across rows must never yank the content out from under it.
+  property bool keyboardNav: false
+
+  function ensureVisible(item) {
+    if (!keyboardNav) return
+    if (!item || !panelFlick || panelFlick.contentHeight <= panelFlick.height) return
+    var top = item.mapToItem(panelFlick.contentItem, 0, 0).y
+    var bottom = top + item.height
+    var margin = Style.space(10)
+    var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+    if (top - margin < panelFlick.contentY)
+      panelFlick.contentY = Math.max(0, top - margin)
+    else if (bottom + margin > panelFlick.contentY + panelFlick.height)
+      panelFlick.contentY = Math.min(maxY, bottom + margin - panelFlick.height)
+  }
+
   // Keep the highlight on whatever row it was on when the list reshapes. If
   // that row is gone, drop the cursor rather than let it point at whatever
   // slid into its place.
@@ -111,6 +132,7 @@ Panel {
 
   function moveCursor(dx, dy) {
     cursorActive = true
+    keyboardNav = true
     if (dx !== 0) {
       var t = tabs.indexOf(tab) + dx
       if (t >= 0 && t < tabs.length) { tab = tabs[t]; setCursor(0) }
@@ -679,6 +701,7 @@ Panel {
 
     hasCursor: root.hasCursor(askButton.rowId)
     foreground: askButton.tone
+    onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
     implicitWidth: askLabel.implicitWidth + Style.space(28)
     implicitHeight: askLabel.implicitHeight + Style.space(12)
 
@@ -688,6 +711,7 @@ Panel {
       cursorShape: Qt.PointingHandCursor
       onEntered: {
         root.cursorActive = true
+        root.keyboardNav = false
         for (var i = 0; i < root.rows.length; i++)
           if (root.rows[i].id === askButton.rowId) root.setCursor(i)
       }
@@ -715,6 +739,7 @@ Panel {
 
     hasCursor: root.hasCursor(actionRow.rowId)
     foreground: root.foreground
+    onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
     implicitHeight: actionContent.implicitHeight + Style.spacing.rowPaddingX
 
     MouseArea {
@@ -723,6 +748,7 @@ Panel {
       cursorShape: Qt.PointingHandCursor
       onEntered: {
         root.cursorActive = true
+        root.keyboardNav = false
         for (var i = 0; i < root.rows.length; i++)
           if (root.rows[i].id === actionRow.rowId) root.setCursor(i)
       }
@@ -791,6 +817,7 @@ Panel {
 
     hasCursor: root.hasCursor("tool:" + toolName)
     foreground: root.foreground
+    onHasCursorChanged: if (hasCursor) root.ensureVisible(this)
     implicitHeight: toolContent.implicitHeight + Style.spacing.rowPaddingX
 
     MouseArea {
@@ -799,6 +826,7 @@ Panel {
       cursorShape: Qt.PointingHandCursor
       onEntered: {
         root.cursorActive = true
+        root.keyboardNav = false
         for (var i = 0; i < root.rows.length; i++)
           if (root.rows[i].id === "tool:" + toolRow.toolName) root.setCursor(i)
       }
