@@ -75,7 +75,16 @@ Item {
   // has no entry — its real permission is the default the server ships for it.
   // Falling back to a blanket "allow" here would have the panel claim a gated
   // tool was wide open while the server was still holding it for approval.
+  // What the user just asked for, shown immediately and dropped as soon as the
+  // config file confirms it. Without this the badge and the switch only move
+  // once the CLI has written and inotify has fired.
+  property var desiredPermissions: ({})
+  property var desiredPaused: null
+
+  readonly property bool pausedShown: desiredPaused !== null ? desiredPaused : paused
+
   function permissionFor(name) {
+    if (desiredPermissions[name] !== undefined) return desiredPermissions[name]
     var value = permissions[name]
     if (value !== undefined) return value
     for (var i = 0; i < catalog.length; i++)
@@ -103,6 +112,12 @@ Item {
       paused = false
       permissions = ({})
     }
+    // The file is the truth again; drop every overlay it has caught up with.
+    if (desiredPaused !== null && desiredPaused === paused) desiredPaused = null
+    var pending = {}
+    for (var k in desiredPermissions)
+      if (permissions[k] !== desiredPermissions[k]) pending[k] = desiredPermissions[k]
+    desiredPermissions = pending
   }
 
   FileView {
@@ -199,9 +214,20 @@ Item {
 
   // ------------------------------------------------------------- run the CLI
 
-  function setPermission(name, value) { runCli(["set", name, value]) }
-  function togglePause() { runCli(["pause", paused ? "off" : "on"]) }
-  function setPaused(value) { runCli(["pause", value ? "on" : "off"]) }
+  function setPermission(name, value) {
+    var next = {}
+    for (var k in desiredPermissions) next[k] = desiredPermissions[k]
+    next[name] = value
+    desiredPermissions = next
+    runCli(["set", name, value])
+  }
+
+  function togglePause() { setPaused(!pausedShown) }
+
+  function setPaused(value) {
+    desiredPaused = value
+    runCli(["pause", value ? "on" : "off"])
+  }
   function approve() { if (pending) { runCli(["decide", pending.id, "allow"]); pending = null } }
   function deny() { if (pending) { runCli(["decide", pending.id, "deny"]); pending = null } }
 
@@ -229,6 +255,8 @@ Item {
       }
     }
   }
+
+  readonly property bool catalogLoading: catalogProc.running
 
   function loadCatalog() { if (!catalogProc.running) catalogProc.running = true }
 

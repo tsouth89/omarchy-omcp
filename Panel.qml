@@ -50,6 +50,7 @@ Panel {
 
   readonly property var tabs: ["activity", "tools", "connect"]
   readonly property var tabLabels: ({ activity: "Activity", tools: "Permissions", connect: "Connect" })
+  readonly property var tabKeys: ({ activity: "f", tools: "t", connect: "c" })
 
   readonly property var rows: {
     var out = []
@@ -131,8 +132,16 @@ Panel {
   // -------------------------------------------------------------- behaviour
 
   function moveCursor(dx, dy) {
-    cursorActive = true
     keyboardNav = true
+    // The first arrow press reveals the cursor where it already is rather than
+    // stepping past it — otherwise row 0 could never be selected. activate()
+    // has always followed this convention; moveCursor did not, so the first
+    // Down landed on row 1 and the top row was unreachable.
+    if (!cursorActive) {
+      cursorActive = true
+      setCursor(cursor)
+      return
+    }
     if (dx !== 0) {
       var t = tabs.indexOf(tab) + dx
       if (t >= 0 && t < tabs.length) { tab = tabs[t]; setCursor(0) }
@@ -168,12 +177,10 @@ Panel {
         engine.togglePause()
         break
       case "copy-claude":
-        copy(root.claudeCommand)
-        flash("Command copied — paste it in a terminal")
+        copy(root.claudeCommand, "Command copied — paste it in a terminal")
         break
       case "copy-json":
-        copy(root.jsonConfig)
-        flash("JSON copied — paste it into your agent's MCP config")
+        copy(root.jsonConfig, "JSON copied — paste it into your agent's MCP config")
         break
       case "doctor":
         Quickshell.execDetached(["omarchy-launch-terminal", root.serverPath, "doctor"])
@@ -182,7 +189,9 @@ Panel {
     }
   }
 
-  function copy(text) {
+  property string copyNotice: ""
+  function copy(text, notice) {
+    copyNotice = notice
     copyProc.command = ["wl-copy", "--", text]
     copyProc.running = true
   }
@@ -217,7 +226,17 @@ Panel {
   }
 
   Timer { id: noticeTimer; interval: 3200; onTriggered: root.notice = "" }
-  Process { id: copyProc; running: false; command: [] }
+  Process {
+    id: copyProc
+    running: false
+    command: []
+    // Confirm from the exit code. Announcing success on click told the user it
+    // had copied even when wl-clipboard was missing.
+    onExited: function(exitCode) {
+      root.flash(exitCode === 0 ? root.copyNotice
+                                : "Could not copy — wl-clipboard is not installed")
+    }
+  }
 
   IpcHandler {
     target: root.ipcTarget
@@ -246,6 +265,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
+    tooltipText: engine.statusLine + "  ·  middle-click to " + (engine.paused ? "arm" : "stop")
     visible: root.showIdleGhost || engine.connected || engine.paused
 
     iconComponent: Component {
@@ -257,15 +277,20 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.bar.iconFont
           color: engine.paused || engine.awaitingApproval ? root.urgent
-            : engine.connected ? root.barForeground
-            : Qt.darker(root.barForeground, 1.7)
+            : root.barForeground
+          // "Present but inactive" is the bar's 0.45 opacity convention rather
+          // than a third invented dim level.
+          Behavior on color { ColorAnimation { duration: 160 } }
 
           // Three different reasons to move, and they must not read the same.
           // A tool call is a single twitch. A held request breathes until it is
           // answered. Paused is dead still and half faded — the ghost is off.
           property real twitch: 1.0
           property real breathe: 1.0
-          opacity: engine.paused ? 0.45 : (engine.awaitingApproval ? breathe : twitch)
+          opacity: engine.paused ? 0.45
+            : engine.awaitingApproval ? breathe
+            : engine.connected ? twitch
+            : 0.45 * twitch
 
           SequentialAnimation {
             id: twitchAnimation
@@ -371,7 +396,7 @@ Panel {
                 color: root.stateColor
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.display
-                opacity: engine.paused ? 0.5 : 1.0
+                opacity: engine.paused ? 0.45 : 1.0
               }
             }
           }
@@ -386,9 +411,9 @@ Panel {
             width: parent.width
             implicitHeight: askColumn.implicitHeight + Style.space(24)
             radius: Style.cornerRadius
-            color: Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.10)
-            border.width: 1
-            border.color: Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.55)
+            color: Util.alpha(root.urgent, 0.10)
+            border.width: Style.normalBorderWidth
+            border.color: Util.alpha(root.urgent, 0.35)
 
             Column {
               id: askColumn
@@ -475,13 +500,13 @@ Panel {
             ActionRow {
               width: parent.width
               rowId: "pause"
-              glyph: engine.paused ? "" : "󰊠"
-              title: engine.paused ? "Paused" : "Stop everything"
-              subtitle: engine.paused
+              glyph: engine.pausedShown ? "" : "󰊠"
+              title: engine.pausedShown ? "Paused" : "Stop everything"
+              subtitle: engine.pausedShown
                 ? "no tool will run, not even a read · p"
                 : "the kill switch · p"
               trailing: true
-              trailingOn: engine.paused
+              trailingOn: engine.pausedShown
             }
 
             PanelSectionHeader {
@@ -492,12 +517,13 @@ Panel {
             }
 
             Column {
+              visible: engine.agents.length > 0
               width: parent.width
               spacing: Style.space(4)
 
               Repeater {
                 model: engine.agents
-                delegate: Row {
+                delegate: RowLayout {
                   required property var modelData
                   width: parent.width
                   spacing: Style.space(8)
@@ -509,11 +535,15 @@ Panel {
                     font.pixelSize: Style.font.caption
                   }
                   Text {
+                    // Elides rather than pushing the call count off the edge:
+                    // the client chooses this name and it can be any length.
+                    Layout.fillWidth: true
                     text: Model.agentLabel(modelData)
                       + (modelData.version ? " " + modelData.version : "")
                     color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
+                    elide: Text.ElideRight
                   }
                   Text {
                     text: (modelData.calls || 0) + " calls · here "
@@ -544,6 +574,7 @@ Panel {
             }
 
             Column {
+              visible: engine.activity.length > 0
               width: parent.width
               spacing: Style.space(2)
 
@@ -575,7 +606,19 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
+            Text {
+              visible: engine.catalog.length === 0
+              width: parent.width
+              text: engine.catalogLoading ? "Reading the tool list…"
+                : "Could not read the tool list. Run `omcp doctor` in a terminal."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
             PanelSectionHeader {
+              visible: engine.catalog.length > 0
               text: "READS"
               foreground: root.foreground
               fontFamily: root.fontFamily
@@ -596,6 +639,7 @@ Panel {
             }
 
             PanelSectionHeader {
+              visible: engine.catalog.length > 0
               text: "WRITES"
               foreground: root.foreground
               fontFamily: root.fontFamily
@@ -650,6 +694,8 @@ Panel {
               subtitle: "for Codex, Zed, or anything else that reads mcpServers"
             }
 
+            CodeBlock { width: parent.width; content: root.jsonConfig }
+
             ActionRow {
               width: parent.width
               rowId: "doctor"
@@ -670,7 +716,7 @@ Panel {
     property string tabId: ""
     readonly property bool selected: root.tab === tabId
 
-    hasCursor: tabButton.selected
+    current: tabButton.selected
     foreground: root.foreground
     implicitWidth: tabLabel.implicitWidth + Style.space(20)
     implicitHeight: tabLabel.implicitHeight + Style.space(10)
@@ -685,7 +731,8 @@ Panel {
     Text {
       id: tabLabel
       anchors.centerIn: parent
-      text: root.tabLabels[tabButton.tabId] || tabButton.tabId
+      text: (root.tabLabels[tabButton.tabId] || tabButton.tabId)
+        + "  " + (root.tabKeys[tabButton.tabId] || "")
       color: tabButton.selected ? root.foreground : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
@@ -718,13 +765,27 @@ Panel {
       onClicked: root.trigger(askButton.rowId)
     }
 
-    Text {
-      id: askLabel
+    Row {
       anchors.centerIn: parent
-      text: askButton.label + "  " + askButton.hint
-      color: askButton.tone
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
+      spacing: Style.space(6)
+
+      Text {
+        id: askLabel
+        text: askButton.label
+        color: askButton.tone
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+      Text {
+        // Dim until the key actually does something, so the hint never invites
+        // a press that will be ignored.
+        text: askButton.hint
+        color: root.cursorActive ? askButton.tone : root.dim
+        opacity: root.cursorActive ? 1.0 : 0.6
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        anchors.verticalCenter: askLabel.verticalCenter
+      }
     }
   }
 
@@ -797,6 +858,7 @@ Panel {
 
       ToggleSwitch {
         visible: actionRow.trailing
+        interactive: false          // the row owns the click, as in Ui/Toggle.qml
         checked: actionRow.trailingOn
         hasCursor: actionRow.hasCursor
         foreground: root.foreground
@@ -856,26 +918,39 @@ Panel {
         }
         Text {
           Layout.fillWidth: true
-          text: toolRow.toolName
+          text: toolRow.tool && toolRow.tool.description
+            ? toolRow.toolName + " · " + toolRow.tool.description
+            : toolRow.toolName
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          maximumLineCount: 2
           elide: Text.ElideRight
         }
       }
 
       Rectangle {
         Layout.alignment: Qt.AlignVCenter
-        implicitWidth: permissionLabel.implicitWidth + Style.space(16)
+        // Width reserved for the widest of Allow/Ask/Off, so cycling a row does
+        // not shuffle everything to its left.
+        implicitWidth: badgeSizer.implicitWidth + Style.space(16)
         implicitHeight: permissionLabel.implicitHeight + Style.space(8)
         radius: Style.cornerRadius
-        color: toolRow.permission === "allow" ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
-          : toolRow.permission === "ask" ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
+        color: toolRow.permission === "allow" ? Style.selectedFillFor(root.accent, root.accent)
+          : toolRow.permission === "ask" ? Style.hoverFillFor(root.foreground, root.accent)
           : "transparent"
-        border.width: 1
-        border.color: toolRow.permission === "deny"
-          ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.25)
-          : "transparent"
+        border.width: toolRow.permission === "deny" ? Style.normalBorderWidth : 0
+        border.color: Style.normalBorderFor(root.foreground, root.accent)
+        Behavior on color { ColorAnimation { duration: 120 } }
+
+        Text {
+          id: badgeSizer
+          visible: false
+          text: "Allow"
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
 
         Text {
           id: permissionLabel
@@ -923,6 +998,17 @@ Panel {
       }
 
       Text {
+        visible: feedRow.entry !== null && feedRow.entry.ms !== undefined && feedRow.entry.ms >= 1000
+        text: feedRow.entry && feedRow.entry.ms !== undefined
+          ? (feedRow.entry.ms >= 1000 ? (feedRow.entry.ms / 1000).toFixed(1) + "s" : "")
+          : ""
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        Layout.alignment: Qt.AlignTop
+      }
+
+      Text {
         Layout.fillWidth: true
         text: feedRow.entry ? (feedRow.entry.summary || feedRow.entry.tool) : ""
         color: feedRow.entry && Model.isRefusal(feedRow.entry.state) ? root.dim : root.foreground
@@ -940,7 +1026,7 @@ Panel {
     property string content: ""
     implicitHeight: codeText.implicitHeight + Style.space(16)
     radius: Style.cornerRadius
-    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+    color: Style.normalFillFor(root.foreground, root.accent)
 
     Text {
       id: codeText
