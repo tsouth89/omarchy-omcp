@@ -37,6 +37,9 @@ Panel {
   property string tab: "activity"
   property int cursor: 0
   property bool cursorActive: false
+  // Keyboard consent belongs to one request, never to the generic approval
+  // controls. A replacement request must be read and armed independently.
+  property string approvalKeyboardId: ""
   property string notice: ""
 
   readonly property int feedLength: setting("feedLength", 40)
@@ -72,8 +75,8 @@ Panel {
   readonly property var rows: {
     var out = []
     if (engine.awaitingApproval) {
-      out.push({ id: "approve" })
-      out.push({ id: "deny" })
+      out.push({ id: "approve:" + engine.pending.id })
+      out.push({ id: "deny:" + engine.pending.id })
     }
     if (tab === "activity") {
       out.push({ id: "pause" })
@@ -155,6 +158,7 @@ Panel {
 
   function moveCursor(dx, dy) {
     keyboardNav = true
+    if (engine.awaitingApproval) approvalKeyboardId = String(engine.pending.id)
     // The first arrow press reveals the cursor where it already is rather than
     // stepping past it — otherwise row 0 could never be selected. activate()
     // has always followed this convention; moveCursor did not, so the first
@@ -179,6 +183,17 @@ Panel {
   }
 
   function trigger(id) {
+    var requestId = engine.pending ? String(engine.pending.id) : ""
+    if (id === "approve:" + requestId && requestId !== "") {
+      engine.approve(requestId)
+      flash("Approved")
+      return
+    }
+    if (id === "deny:" + requestId && requestId !== "") {
+      engine.deny(requestId)
+      flash("Denied")
+      return
+    }
     if (id.indexOf("profile:") === 0) {
       engine.setProfile(id.substring(8))
       flash("Applying " + Model.profileLabel(id.substring(8)) + " profile…")
@@ -192,14 +207,6 @@ Panel {
       return
     }
     switch (id) {
-      case "approve":
-        engine.approve()
-        flash("Approved")
-        break
-      case "deny":
-        engine.deny()
-        flash("Denied")
-        break
       case "pause":
         engine.togglePause()
         break
@@ -233,6 +240,7 @@ Panel {
   onOpenedChanged: if (opened) {
     cursorActive = false
     cursor = 0
+    approvalKeyboardId = ""
     notice = ""
     if (panelFlick) panelFlick.contentY = 0
     engine.loadCatalog()
@@ -259,6 +267,14 @@ Panel {
     // a single keystroke. An agent must never be able to make the next key you
     // press mean "yes". The ghost turns red and breathes, and a notification
     // fires; opening it stays the user's move.
+  }
+
+  Connections {
+    target: engine
+    function onPendingChanged() {
+      var nextId = engine.pending ? String(engine.pending.id) : ""
+      if (root.approvalKeyboardId !== nextId) root.approvalKeyboardId = ""
+    }
   }
 
   Timer { id: noticeTimer; interval: 3200; onTriggered: root.notice = "" }
@@ -307,6 +323,7 @@ Panel {
     iconComponent: Component {
       Item {
         Text {
+          textFormat: Text.PlainText
           id: ghost
           anchors.centerIn: parent
           text: "󰊠"
@@ -393,8 +410,11 @@ Panel {
         // do nothing until the cursor has been moved into the panel. Otherwise
         // one stray keystroke, from someone who never saw the prompt, decides
         // it. Navigating first is the cheap proof that you are looking at it.
-        if (key === "a" && engine.awaitingApproval && root.cursorActive) root.trigger("approve")
-        else if (key === "d" && engine.awaitingApproval && root.cursorActive) root.trigger("deny")
+        var requestId = engine.pending ? String(engine.pending.id) : ""
+        var armed = engine.awaitingApproval && root.cursorActive
+          && root.approvalKeyboardId === requestId
+        if (key === "a" && armed) root.trigger("approve:" + requestId)
+        else if (key === "d" && armed) root.trigger("deny:" + requestId)
         else if (key === "p" && root.cursorActive) root.trigger("pause")
         else if (key === "c") { root.tab = "connect"; root.setCursor(0) }
         else if (key === "t") { root.tab = "tools"; root.setCursor(0) }
@@ -428,6 +448,7 @@ Panel {
             fontFamily: root.fontFamily
             iconComponent: Component {
               Text {
+                textFormat: Text.PlainText
                 text: "󰊠"
                 color: root.stateColor
                 font.family: root.fontFamily
@@ -461,6 +482,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: engine.pending
                   ? (Model.agentLabel(engine.pending.agent) + " wants to " + engine.pending.summary)
@@ -472,6 +494,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: engine.pending
                   ? (engine.pending.tool + " · denied automatically in "
@@ -486,13 +509,13 @@ Panel {
                 spacing: Style.space(8)
 
                 AskButton {
-                  rowId: "approve"
+                  rowId: engine.pending ? "approve:" + engine.pending.id : ""
                   label: "Approve"
                   hint: "a"
                   tone: root.accent
                 }
                 AskButton {
-                  rowId: "deny"
+                  rowId: engine.pending ? "deny:" + engine.pending.id : ""
                   label: "Deny"
                   hint: "d"
                   tone: root.urgent
@@ -502,6 +525,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.notice !== ""
             width: parent.width
             text: root.notice
@@ -565,12 +589,14 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: ""
                     color: root.accent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                   }
                   Text {
+                    textFormat: Text.PlainText
                     // Elides rather than pushing the call count off the edge:
                     // the client chooses this name and it can be any length.
                     Layout.fillWidth: true
@@ -582,6 +608,7 @@ Panel {
                     elide: Text.ElideRight
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: (modelData.calls || 0) + " calls · here "
                       + Model.duration(Math.max(0, engine.now - (modelData.since || engine.now)))
                     color: root.dim
@@ -599,6 +626,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: engine.activity.length === 0
               width: parent.width
               text: "Nothing yet. Connect an agent from the Connect tab, then ask it to "
@@ -632,6 +660,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: "Every tool is one of three things: Allow runs it, Ask parks it here until "
                 + "you answer, Off hides it from the agent completely. There is no tool that "
@@ -664,6 +693,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: engine.catalog.length > 0
               width: parent.width
               text: Model.profileDescription(engine.profileShown)
@@ -674,6 +704,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: engine.catalog.length === 0
               width: parent.width
               text: engine.catalogLoading ? "Reading the tool list…"
@@ -732,6 +763,7 @@ Panel {
             spacing: Style.space(10)
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: "OMCP speaks MCP over stdio. Point an agent at the command below "
                 + "and it gets the tools you left switched on — nothing else."
@@ -794,6 +826,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: tabLabel
       anchors.centerIn: parent
       text: (root.tabLabels[tabButton.tabId] || tabButton.tabId)
@@ -810,6 +843,7 @@ Panel {
     property string label: ""
     property string hint: ""
     property color tone: root.foreground
+    property string pressedRowId: ""
 
     hasCursor: root.hasCursor(askButton.rowId)
     foreground: askButton.tone
@@ -826,7 +860,13 @@ Panel {
         for (var i = 0; i < root.rows.length; i++)
           if (root.rows[i].id === askButton.rowId) root.setCursor(i)
       }
-      onClicked: root.trigger(askButton.rowId)
+      onPressed: askButton.pressedRowId = askButton.rowId
+      onCanceled: askButton.pressedRowId = ""
+      onClicked: {
+        var pressed = askButton.pressedRowId
+        askButton.pressedRowId = ""
+        root.trigger(pressed)
+      }
     }
 
     Row {
@@ -834,6 +874,7 @@ Panel {
       spacing: Style.space(6)
 
       Text {
+        textFormat: Text.PlainText
         id: askLabel
         text: askButton.label
         color: askButton.tone
@@ -841,6 +882,7 @@ Panel {
         font.pixelSize: Style.font.bodySmall
       }
       Text {
+        textFormat: Text.PlainText
         // Dim until the key actually does something, so the hint never invites
         // a press that will be ignored.
         text: askButton.hint
@@ -878,6 +920,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: profileLabel
       anchors.centerIn: parent
       text: Model.profileLabel(profileChip.profileName)
@@ -922,6 +965,7 @@ Panel {
       spacing: Style.space(10)
 
       Text {
+        textFormat: Text.PlainText
         text: actionRow.glyph
         color: root.foreground
         font.family: root.fontFamily
@@ -935,6 +979,7 @@ Panel {
         spacing: Style.space(1)
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: actionRow.title
           color: root.foreground
@@ -943,6 +988,7 @@ Panel {
           elide: Text.ElideRight
         }
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           visible: actionRow.subtitle !== ""
           text: actionRow.subtitle
@@ -1005,6 +1051,7 @@ Panel {
         spacing: Style.space(1)
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: toolRow.tool ? toolRow.tool.title : ""
           color: toolRow.permission === "deny" ? root.dim : root.foreground
@@ -1013,6 +1060,7 @@ Panel {
           elide: Text.ElideRight
         }
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: toolRow.tool && toolRow.tool.description
             ? toolRow.toolName + " · " + toolRow.tool.description
@@ -1041,6 +1089,7 @@ Panel {
         Behavior on color { ColorAnimation { duration: 120 } }
 
         Text {
+          textFormat: Text.PlainText
           id: badgeSizer
           visible: false
           text: "Allow"
@@ -1049,6 +1098,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           id: permissionLabel
           anchors.centerIn: parent
           text: Model.permissionLabel(toolRow.permission)
@@ -1075,6 +1125,7 @@ Panel {
       spacing: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         text: feedRow.entry ? Model.clockTime(feedRow.entry.ts) : ""
         color: root.dim
         font.family: root.fontFamily
@@ -1083,6 +1134,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         text: feedRow.entry ? Model.stateGlyph(feedRow.entry.state) : ""
         color: feedRow.entry && Model.isRefusal(feedRow.entry.state) ? root.urgent
           : feedRow.entry && feedRow.entry.state === "error" ? root.urgent
@@ -1094,6 +1146,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: feedRow.entry !== null && feedRow.entry.ms !== undefined && feedRow.entry.ms >= 1000
         text: feedRow.entry && feedRow.entry.ms !== undefined
           ? (feedRow.entry.ms >= 1000 ? (feedRow.entry.ms / 1000).toFixed(1) + "s" : "")
@@ -1105,6 +1158,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         Layout.fillWidth: true
         text: feedRow.entry ? (feedRow.entry.summary || feedRow.entry.tool) : ""
         color: feedRow.entry && Model.isRefusal(feedRow.entry.state) ? root.dim : root.foreground
@@ -1125,6 +1179,7 @@ Panel {
     color: Style.normalFillFor(root.foreground, root.accent)
 
     Text {
+      textFormat: Text.PlainText
       id: codeText
       anchors.left: parent.left
       anchors.right: parent.right

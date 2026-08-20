@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -56,6 +57,40 @@ class Validators(unittest.TestCase):
 
     def test_clean_label_strips_controls(self):
         self.assertEqual(omcp.clean_label("x\n\ty", "agent"), "x y")
+        self.assertEqual(omcp.safe_display_text("safe\u202eexe.txt\nnext"), "safe exe.txt next")
+
+    def test_notification_text_cannot_be_markup(self):
+        self.assertEqual(
+            omcp.plain_notification_text('<img src="https://example.test/pixel"> ![approve](x) & **yes**'),
+            '＜img src="https://example.test/pixel"＞ ！［approve］（x） ＆ ＊＊yes＊＊',
+        )
+
+
+class ConsentUi(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, "Panel.qml"), "r", encoding="utf-8") as fh:
+            cls.panel = fh.read()
+        with open(os.path.join(ROOT, "Service.qml"), "r", encoding="utf-8") as fh:
+            cls.service = fh.read()
+
+    def test_every_text_item_explicitly_uses_plain_text(self):
+        text_items = re.findall(r"^\s*Text\s*\{", self.panel, flags=re.MULTILINE)
+        plain_formats = re.findall(r"^\s*textFormat:\s*Text\.PlainText\s*$", self.panel,
+                                   flags=re.MULTILINE)
+        self.assertGreater(len(text_items), 0)
+        self.assertEqual(len(plain_formats), len(text_items))
+
+    def test_approval_rows_and_shortcuts_are_request_specific(self):
+        self.assertIn('"approve:" + engine.pending.id', self.panel)
+        self.assertIn('"deny:" + engine.pending.id', self.panel)
+        self.assertIn("root.approvalKeyboardId === requestId", self.panel)
+        self.assertIn("String(pending.id) === String(expectedId)", self.service)
+
+    def test_shared_status_components_receive_no_agent_label(self):
+        status = self.service.split("readonly property string statusLine:", 1)[1].split(
+            "signal activityArrived", 1)[0]
+        self.assertNotIn("agentSummary", status)
 
 
 class Catalogue(unittest.TestCase):

@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 PROTOCOL_DEFAULT = "2025-06-18"
 SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", "2025-06-18")
 
@@ -328,9 +328,8 @@ def log_activity(entry):
     entry.setdefault("ts", now())
     # The feed is scanned, not read. Long validation errors (a full theme list,
     # say) would otherwise push everything else off the panel.
-    summary = str(entry.get("summary", ""))
-    if len(summary) > 160:
-        entry["summary"] = summary[:157] + "..."
+    summary = safe_display_text(entry.get("summary", ""), limit=160)
+    entry["summary"] = summary
     line = json.dumps(entry, ensure_ascii=False)
     try:
         # The log is the audit trail, and several servers append to it at once.
@@ -523,6 +522,7 @@ def _acquire_pending_slot(deadline, expires):
 
 
 def request_approval(agent_name, tool, summary, detail):
+    summary = safe_display_text(summary, limit=200)
     deadline = time.time() + ASK_TIMEOUT_SECONDS
     expires = int(deadline)
     if not _acquire_pending_slot(deadline, expires):
@@ -686,9 +686,9 @@ def notify(title, body="", urgency="normal", exec_on_click=None):
     args = ["omarchy", "notification", "send", "--app-name", "OMCP", "-u", urgency]
     if exec_on_click:
         args += ["--exec", exec_on_click]
-    args += [title]
+    args += [plain_notification_text(title)]
     if body:
-        args += [body]
+        args += [plain_notification_text(body)]
     try:
         subprocess.run(argv_trusted(args), capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError, ToolError):
@@ -705,12 +705,30 @@ def clean_label(value, fallback, limit=64):
     single-line log format, and a leading dash could be read as an option by a
     command this name is interpolated into.
     """
-    text = re.sub(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]",
-                  " ", str(value or "")).strip()
-    text = re.sub(r"\s+", " ", text).lstrip("-").strip()
+    text = safe_display_text(value, limit=None).lstrip("-").strip()
     if not text:
         return fallback
     return text[:limit]
+
+
+def safe_display_text(value, limit=None):
+    """Flatten controls and bidirectional overrides before text reaches UI."""
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]",
+                  " ", str(value or "")).strip()
+    text = re.sub(r"\s+", " ", text)
+    if limit is not None and len(text) > limit:
+        return text[:max(0, limit - 3)] + "..."
+    return text
+
+
+def plain_notification_text(value):
+    """Keep notification daemons from treating external text as HTML or Markdown."""
+    table = str.maketrans({
+        "&": "＆", "<": "＜", ">": "＞", "[": "［", "]": "］",
+        "(": "（", ")": "）", "*": "＊", "_": "＿", "`": "｀",
+        "#": "＃", "!": "！",
+    })
+    return safe_display_text(value).translate(table)
 
 
 ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{4,16}$")
@@ -844,7 +862,7 @@ def parse_desktop_entry(app_id, path, contents, keep_contents=False):
         if not in_main:
             continue
         if line.startswith("Name=") and entry["name"] == app_id:
-            entry["name"] = line[5:].strip()
+            entry["name"] = clean_label(line[5:], app_id, limit=96)
         elif line.startswith(("GenericName=", "Keywords=", "Comment=")):
             entry["keywords"] += " " + line.split("=", 1)[1]
         elif line.startswith("NoDisplay=") and line[10:].strip().lower() == "true":
@@ -1082,9 +1100,11 @@ def tool_send_notification(args):
     # flag rather than as text. Refuse it here instead of hoping it is ignored.
     if title.startswith("-") or body.startswith("-"):
         raise ToolError("notification text may not begin with '-'")
-    command = ["omarchy", "notification", "send", "--app-name", "OMCP", "-u", urgency, title]
+    safe_title = plain_notification_text(title)
+    safe_body = plain_notification_text(body)
+    command = ["omarchy", "notification", "send", "--app-name", "OMCP", "-u", urgency, safe_title]
     if body:
-        command.append(body)
+        command.append(safe_body)
     run(command)
     return {"sent": True}, "sent a notification: %s" % title
 

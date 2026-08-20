@@ -72,7 +72,10 @@ Item {
   // The one line the tooltip and the hero both want.
   readonly property string statusLine: paused ? "paused — nothing can run"
     : awaitingApproval ? "waiting for you to answer"
-    : connected ? agentSummary + " · " + callCount + " calls"
+    // Shared shell components own the Text items behind the hero and tooltip,
+    // so this value deliberately contains counts only, never client text.
+    : connected ? agents.length + (agents.length === 1 ? " agent" : " agents")
+      + " connected · " + callCount + " calls"
     : "no agent connected"
 
   signal activityArrived(string tool, string state)
@@ -259,8 +262,18 @@ Item {
     desiredPaused = value
     runCli(["pause", value ? "on" : "off"])
   }
-  function approve() { if (pending) { runCli(["decide", pending.id, "allow"]); pending = null } }
-  function deny() { if (pending) { runCli(["decide", pending.id, "deny"]); pending = null } }
+  function approve(expectedId) {
+    if (pending && String(pending.id) === String(expectedId)) {
+      runCli(["decide", pending.id, "allow"])
+      pending = null
+    }
+  }
+  function deny(expectedId) {
+    if (pending && String(pending.id) === String(expectedId)) {
+      runCli(["decide", pending.id, "deny"])
+      pending = null
+    }
+  }
 
   // Configuration writes are serialized. Separate detached processes could
   // acquire the file lock in a different order than the user's clicks, making
