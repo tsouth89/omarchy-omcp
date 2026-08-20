@@ -4,13 +4,13 @@ import Quickshell.Io
 import "Model.js" as Model
 
 // The engine behind the ghost. Two instances exist: one the panel owns, and one
-// the shell mounts headless (kind: "service") so keybinds and scripts can reach
-// the kill switch whether or not the bar icon is placed.
+// the shell mounts as kind: "service". For a third-party plugin that service is
+// only created while this widget is on the bar; `omcp pause` (the CLI) is the
+// path that still works with the ghost unplaced.
 //
-// It holds no state of its own. The MCP server owns everything on disk — the
-// permission file, the agent registry, the activity log, the request waiting for
-// an answer — and this watches those four files. Nothing here polls: every
-// property below moves because inotify said a file changed.
+// It holds no state of its own. The MCP server owns everything on disk and this
+// watches those four files. A slow timer reloads them as a backstop when an
+// atomic replace drops an inotify watch.
 Item {
   id: root
 
@@ -25,15 +25,18 @@ Item {
   property var pluginRegistry: null
 
   readonly property string home: Quickshell.env("HOME")
-  // The server resolves these through XDG_CONFIG_HOME / XDG_STATE_HOME. If the
-  // panel assumed the defaults, a user with either set would get a working
-  // server and a permanently dead panel — approvals would never appear and
-  // would time out to denied.
-  readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (home + "/.config")
-  readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")
-  readonly property string configPath: configHome + "/omcp/config.json"
-  readonly property string statePath: stateHome + "/omcp"
-  readonly property string cli: Qt.resolvedUrl("bin/omcp").toString().replace(/^file:\/\//, "")
+  // Same paths the server uses: passwd-home `~/.config/omcp` and
+  // `~/.local/state/omcp`. Honouring a client-injected XDG_* on the server
+  // while the panel read the shell's would split the permission file from the
+  // ghost, so neither side follows XDG.
+  readonly property string configPath: home + "/.config/omcp/config.json"
+  readonly property string statePath: home + "/.local/state/omcp"
+  readonly property string cli: {
+    var raw = Qt.resolvedUrl("bin/omcp").toString()
+    if (raw.indexOf("file://") === 0) raw = raw.substring(7)
+    if (raw.indexOf("localhost/") === 0) raw = raw.substring(9)
+    try { return decodeURIComponent(raw) } catch (e) { return raw }
+  }
 
   // ------------------------------------------------------------------ state
   property bool paused: false
@@ -89,12 +92,13 @@ Item {
     if (value !== undefined) return value
     for (var i = 0; i < catalog.length; i++)
       if (catalog[i].name === name) return catalog[i].default
-    return "allow"
+    return "ask"
   }
 
   // -------------------------------------------------------------- the files
 
   FileView {
+    id: configFile
     path: root.configPath
     watchChanges: true
     printErrors: false
@@ -121,6 +125,7 @@ Item {
   }
 
   FileView {
+    id: agentsFile
     path: root.statePath + "/agents.json"
     watchChanges: true
     printErrors: false
@@ -171,6 +176,7 @@ Item {
   }
 
   FileView {
+    id: pendingFile
     path: root.statePath + "/pending.json"
     watchChanges: true
     printErrors: false
@@ -188,27 +194,30 @@ Item {
     }
   }
 
+  function reloadWatches() {
+    configFile.reload()
+    agentsFile.reload()
+    activityFile.reload()
+    pendingFile.reload()
+  }
+
   // ------------------------------------------------------------------- time
   //
-  // Two clocks rather than one. The slow one keeps "3m ago" honest; the fast one
-  // only runs while a request is counting down, because that is the only second
-  // anyone is watching.
+  // One clock, three speeds, plus a short prime after mount. The omcp state
+  // dirs do not exist until the CLI first runs, and FileView cannot watch a
+  // parent that is not there yet — so the first few ticks mkdir (via `omcp
+  // tools`) and re-attach the watches.
+  property int primeTicks: 0
 
-  // One clock, three speeds, because the thing on screen that moves fastest
-  // decides how often anything needs recomputing: a countdown ticks in seconds,
-  // an attached agent's "here 40s" reads wrong if it lags, and an idle machine
-  // has nothing to update at all.
   Timer {
-    interval: root.pending !== null ? 1000 : (root.connected ? 5000 : 30000)
+    interval: root.primeTicks < 8 || root.pending !== null ? 1000 : (root.connected ? 5000 : 30000)
     repeat: true
-    // Idle means idle: with no agent attached and nothing pending, the inotify
-    // watches already cover every change, so the tick only needs to exist as a
-    // rotation backstop while something is actually happening.
-    running: root.connected || root.pending !== null || root.agentsRaw.length > 0
+    running: root.primeTicks < 8 || root.connected || root.pending !== null || root.agentsRaw.length > 0
     onTriggered: {
+      if (root.primeTicks < 8) root.primeTicks += 1
       root.now = Math.floor(Date.now() / 1000)
       if (root.pending && root.pending.expires <= root.now) root.pending = null
-      activityFile.reload()   // backstop: recover a watch lost to a rotation
+      root.reloadWatches()
     }
   }
 
@@ -252,6 +261,7 @@ Item {
         } catch (e) {
           root.catalog = []
         }
+        root.reloadWatches()
       }
     }
   }
@@ -260,8 +270,8 @@ Item {
 
   function loadCatalog() { if (!catalogProc.running) catalogProc.running = true }
 
-  // Scripts and keybinds talk to the headless copy; the panel owns the target
-  // name so a notification can summon the real UI.
+  // Live while the widget is on the bar. Without it, `omcp pause on` still
+  // writes config.json and the server honours that without QML.
   IpcHandler {
     target: "omcp-service"
     enabled: !root.panelOwned

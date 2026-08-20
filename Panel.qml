@@ -28,7 +28,7 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  readonly property color stateColor: engine.paused ? urgent
+  readonly property color stateColor: engine.pausedShown ? urgent
     : engine.awaitingApproval ? urgent
     : engine.connected ? accent
     : dim
@@ -43,14 +43,31 @@ Panel {
   readonly property bool showIdleGhost: setting("showIdleGhost", true)
 
   readonly property string serverPath: engine.cli
-  readonly property string claudeCommand: "claude mcp add omcp -- " + serverPath + " serve"
-  readonly property string jsonConfig:
-    '{\n  "mcpServers": {\n    "omcp": {\n      "command": "' + serverPath + '",\n'
-    + '      "args": ["serve"]\n    }\n  }\n}'
+  readonly property string claudeCommand: "claude mcp add omcp -- " + quotedPath(serverPath) + " serve"
+  readonly property string jsonConfig: JSON.stringify({
+    mcpServers: { omcp: { command: serverPath, args: ["serve"] } }
+  }, null, 2)
+
+  function quotedPath(value) {
+    return "'" + String(value).replace(/'/g, "'\\''") + "'"
+  }
 
   readonly property var tabs: ["activity", "tools", "connect"]
   readonly property var tabLabels: ({ activity: "Activity", tools: "Permissions", connect: "Connect" })
   readonly property var tabKeys: ({ activity: "f", tools: "t", connect: "c" })
+
+  readonly property var readTools: {
+    var out = []
+    for (var i = 0; i < engine.catalog.length; i++)
+      if (!engine.catalog[i].write) out.push(engine.catalog[i])
+    return out
+  }
+  readonly property var writeTools: {
+    var out = []
+    for (var i = 0; i < engine.catalog.length; i++)
+      if (engine.catalog[i].write) out.push(engine.catalog[i])
+    return out
+  }
 
   readonly property var rows: {
     var out = []
@@ -265,7 +282,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    tooltipText: engine.statusLine + "  ·  middle-click to " + (engine.paused ? "arm" : "stop")
+    tooltipText: engine.statusLine + "  ·  middle-click to " + (engine.pausedShown ? "arm" : "stop")
     visible: root.showIdleGhost || engine.connected || engine.paused
 
     iconComponent: Component {
@@ -276,7 +293,7 @@ Panel {
           text: "󰊠"
           font.family: root.fontFamily
           font.pixelSize: Style.bar.iconFont
-          color: engine.paused || engine.awaitingApproval ? root.urgent
+          color: engine.pausedShown || engine.awaitingApproval ? root.urgent
             : root.barForeground
           // "Present but inactive" is the bar's 0.45 opacity convention rather
           // than a third invented dim level.
@@ -287,7 +304,7 @@ Panel {
           // answered. Paused is dead still and half faded — the ghost is off.
           property real twitch: 1.0
           property real breathe: 1.0
-          opacity: engine.paused ? 0.45
+          opacity: engine.pausedShown ? 0.45
             : engine.awaitingApproval ? breathe
             : engine.connected ? twitch
             : 0.45 * twitch
@@ -315,7 +332,7 @@ Panel {
         // A refusal deserves a mark that outlives the twitch, so you can tell at
         // a glance that the last thing an agent tried did not happen.
         Rectangle {
-          visible: Model.isRefusal(engine.lastState) && !engine.paused
+          visible: Model.isRefusal(engine.lastState) && !engine.pausedShown
           width: Math.max(3, Style.space(4))
           height: width
           radius: width / 2
@@ -359,7 +376,7 @@ Panel {
         // it. Navigating first is the cheap proof that you are looking at it.
         if (key === "a" && engine.awaitingApproval && root.cursorActive) root.trigger("approve")
         else if (key === "d" && engine.awaitingApproval && root.cursorActive) root.trigger("deny")
-        else if (key === "p") root.trigger("pause")
+        else if (key === "p" && root.cursorActive) root.trigger("pause")
         else if (key === "c") { root.tab = "connect"; root.setCursor(0) }
         else if (key === "t") { root.tab = "tools"; root.setCursor(0) }
         // `f` rather than `l`: PanelKeyCatcher eats l/h/j/k as vim motion keys
@@ -396,7 +413,7 @@ Panel {
                 color: root.stateColor
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.display
-                opacity: engine.paused ? 0.45 : 1.0
+                opacity: engine.pausedShown ? 0.45 : 1.0
               }
             }
           }
@@ -610,7 +627,7 @@ Panel {
               visible: engine.catalog.length === 0
               width: parent.width
               text: engine.catalogLoading ? "Reading the tool list…"
-                : "Could not read the tool list. Run `omcp doctor` in a terminal."
+                : "Could not read the tool list. Run doctor from the Connect tab."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -628,11 +645,10 @@ Panel {
               width: parent.width
               spacing: Style.space(2)
               Repeater {
-                model: engine.catalog
+                model: root.readTools
                 delegate: ToolRow {
                   required property var modelData
                   width: parent.width
-                  visible: !modelData.write
                   tool: modelData
                 }
               }
@@ -649,11 +665,10 @@ Panel {
               width: parent.width
               spacing: Style.space(2)
               Repeater {
-                model: engine.catalog
+                model: root.writeTools
                 delegate: ToolRow {
                   required property var modelData
                   width: parent.width
-                  visible: modelData.write
                   tool: modelData
                 }
               }
@@ -757,7 +772,6 @@ Panel {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onEntered: {
-        root.cursorActive = true
         root.keyboardNav = false
         for (var i = 0; i < root.rows.length; i++)
           if (root.rows[i].id === askButton.rowId) root.setCursor(i)
@@ -808,7 +822,6 @@ Panel {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onEntered: {
-        root.cursorActive = true
         root.keyboardNav = false
         for (var i = 0; i < root.rows.length; i++)
           if (root.rows[i].id === actionRow.rowId) root.setCursor(i)
@@ -887,7 +900,6 @@ Panel {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onEntered: {
-        root.cursorActive = true
         root.keyboardNav = false
         for (var i = 0; i < root.rows.length; i++)
           if (root.rows[i].id === "tool:" + toolRow.toolName) root.setCursor(i)
