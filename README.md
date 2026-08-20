@@ -86,9 +86,15 @@ Ships as **Allow** except `read_clipboard`, `write_clipboard`, and `launch_app`,
 
 <img src="docs/approval.png" alt="An agent asking permission" width="460">
 
-The agent's tool call blocks mid-flight. The ghost turns red, the panel summons itself, and a
+The agent's tool call blocks mid-flight. The ghost turns urgent and starts breathing, and a
 notification fires. You get 60 seconds; **no answer means denied**, because an unattended machine
 should never grant anything.
+
+The panel deliberately does **not** open itself when an agent asks. It takes exclusive keyboard
+focus, so summoning it on the agent's schedule would pull the keyboard out of whatever you were
+typing into — with Approve one keystroke away. For the same reason the `a` and `d` shortcuts stay
+inert until you have moved the cursor into the panel. An agent must never be able to make the next
+key you press mean "yes".
 
 ### The kill switch
 
@@ -111,7 +117,14 @@ This plugin hands an AI agent real control of your desktop. That deserves plain 
 - **Off means invisible.** A tool set to Off is filtered out of `tools/list`, so a
   prompt-injected agent cannot discover it and try anyway.
 - **Everything is logged**, including what was refused, at
-  `~/.local/state/omcp/activity.jsonl`.
+  `~/.local/state/omcp/activity.jsonl`. Its directory is created `0700` and the files `0600`,
+  because a held request records the arguments it is waiting on — for `write_clipboard`, the text
+  itself.
+- **An agent's name is not proof of anything.** The name in the panel is what the client sent in
+  its MCP handshake. It identifies, it does not authenticate; anything you launch can call itself
+  whatever it likes. Treat an unexpected connection notification as the real signal.
+- **The only files it deletes are its own**, under `~/.local/state/omcp/`. There is no tool that
+  removes user data.
 - **What it touches:** `~/.config/omcp/` for permissions, `~/.local/state/omcp/` for the log and
   the agent registry. It manages no systemd units and installs nothing.
 
@@ -149,8 +162,35 @@ agent ──stdio──▶ bin/omcp ──▶ hyprctl / omarchy / grim / wpctl
 
 ## Requirements
 
-Omarchy 4 (Quattro) and Python 3. Everything else it uses — `hyprctl`, `grim`, `wl-copy`,
-`wpctl`, `gio` — is already on a stock Omarchy install. No pip, no npm, no daemon.
+Omarchy 4 (Quattro) and Python 3 — standard library only, nothing to install.
+
+| Command | Used for |
+|---|---|
+| `hyprctl` | windows, workspaces, monitors |
+| `omarchy` | themes, backgrounds, notifications |
+| `omarchy-shell` | do-not-disturb state |
+| `grim` | screenshots |
+| `wl-copy` / `wl-paste` | clipboard |
+| `wpctl` | volume |
+| `gio` | launching an installed desktop entry |
+| `xdg-open` | opening a URL |
+| `brightnessctl` | backlight, where the machine has one |
+
+Every one of those ships with a stock Omarchy 4 install. Nothing is fetched at install time or at
+runtime, and there are no bundled binaries.
+
+## Removing it
+
+```bash
+omarchy bar remove tsouth89.omcp      # take the ghost off the bar
+omarchy plugin disable tsouth89.omcp
+omarchy plugin remove tsouth89.omcp   # deletes the plugin checkout
+claude mcp remove omcp                # unregister it from Claude Code
+rm -rf ~/.config/omcp ~/.local/state/omcp    # permissions and activity log
+```
+
+Removing the plugin removes the server with it. Nothing was installed outside the checkout and no
+background service was registered, so there is no separate uninstall step.
 
 ## License
 

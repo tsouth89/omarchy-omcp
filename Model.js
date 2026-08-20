@@ -7,11 +7,6 @@ var PERMISSIONS = ["allow", "ask", "deny"]
 
 // What each permission promises, in the panel's own words.
 var PERMISSION_LABEL = { allow: "Allow", ask: "Ask", deny: "Off" }
-var PERMISSION_HINT = {
-  allow: "runs without interrupting you",
-  ask: "holds until you approve it here",
-  deny: "hidden from the agent entirely"
-}
 
 function nextPermission(current) {
   var i = PERMISSIONS.indexOf(current)
@@ -19,7 +14,6 @@ function nextPermission(current) {
 }
 
 function permissionLabel(value) { return PERMISSION_LABEL[value] || value }
-function permissionHint(value) { return PERMISSION_HINT[value] || "" }
 
 function clockTime(epochSeconds) {
   if (!epochSeconds) return ""
@@ -28,15 +22,6 @@ function clockTime(epochSeconds) {
   return pad(d.getHours()) + ":" + pad(d.getMinutes())
 }
 
-function ago(epochSeconds, nowSeconds) {
-  if (!epochSeconds) return "never"
-  var d = Math.max(0, nowSeconds - epochSeconds)
-  if (d < 5) return "just now"
-  if (d < 60) return d + "s ago"
-  if (d < 3600) return Math.floor(d / 60) + "m ago"
-  if (d < 86400) return Math.floor(d / 3600) + "h ago"
-  return Math.floor(d / 86400) + "d ago"
-}
 
 function duration(seconds) {
   if (seconds < 60) return seconds + "s"

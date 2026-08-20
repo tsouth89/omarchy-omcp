@@ -25,23 +25,36 @@ Item {
   property var pluginRegistry: null
 
   readonly property string home: Quickshell.env("HOME")
-  readonly property string configPath: home + "/.config/omcp/config.json"
-  readonly property string statePath: home + "/.local/state/omcp"
+  // The server resolves these through XDG_CONFIG_HOME / XDG_STATE_HOME. If the
+  // panel assumed the defaults, a user with either set would get a working
+  // server and a permanently dead panel — approvals would never appear and
+  // would time out to denied.
+  readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (home + "/.config")
+  readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")
+  readonly property string configPath: configHome + "/omcp/config.json"
+  readonly property string statePath: stateHome + "/omcp"
   readonly property string cli: Qt.resolvedUrl("bin/omcp").toString().replace(/^file:\/\//, "")
 
   // ------------------------------------------------------------------ state
   property bool paused: false
   property var permissions: ({})
-  property var agents: []
+  property var agentsRaw: []
+  // Derived, not stored: a SIGKILLed agent never rewrites the registry, so if
+  // the filter only ran on file change its entry stayed lit forever — and kept
+  // the poll timer in its fast mode on an idle machine.
+  readonly property var agents: {
+    var live = []
+    for (var i = 0; i < agentsRaw.length; i++)
+      if (now - (agentsRaw[i].lastSeen || 0) < 60) live.push(agentsRaw[i])
+    return live
+  }
   property var activity: []
   property var pending: null
   property var catalog: []
   property int now: Math.floor(Date.now() / 1000)
   property int feedLength: 40
 
-  // Bumped whenever a new record lands, which is what the bar icon animates on.
-  property int pulse: 0
-  property string lastTool: ""
+  // The most recent record's outcome, so the bar icon can mark a refusal.
   property string lastState: ""
 
   readonly property bool connected: agents.length > 0
@@ -107,15 +120,10 @@ Item {
     // agents.json moving is the cheapest signal that something is alive; use it
     // to re-read the feed in case its own watch was lost to a rotation.
     activityFile.reload()
-
     try {
-      var list = (JSON.parse(raw || "{}").agents) || []
-      var live = []
-      for (var i = 0; i < list.length; i++)
-        if (now - (list[i].lastSeen || 0) < 60) live.push(list[i])
-      agents = live
+      agentsRaw = (JSON.parse(raw || "{}").agents) || []
     } catch (e) {
-      agents = []
+      agentsRaw = []
     }
   }
 
@@ -135,11 +143,13 @@ Item {
     var changed = head && (activity.length === 0
       || head.ts !== activity[0].ts || head.tool !== activity[0].tool
       || next.length !== activity.length)
+    // Reassigning the array resets the Repeater and rebuilds every delegate, so
+    // only do it when the contents actually moved. The backstop reload fires on
+    // a timer and would otherwise churn the whole feed for nothing.
+    if (!changed && next.length === activity.length) return
     activity = next
     if (changed && head) {
-      lastTool = head.tool
       lastState = head.state
-      pulse = pulse + 1
       activityArrived(head.tool, head.state)
     }
   }
@@ -175,7 +185,10 @@ Item {
   Timer {
     interval: root.pending !== null ? 1000 : (root.connected ? 5000 : 30000)
     repeat: true
-    running: true
+    // Idle means idle: with no agent attached and nothing pending, the inotify
+    // watches already cover every change, so the tick only needs to exist as a
+    // rotation backstop while something is actually happening.
+    running: root.connected || root.pending !== null || root.agentsRaw.length > 0
     onTriggered: {
       root.now = Math.floor(Date.now() / 1000)
       if (root.pending && root.pending.expires <= root.now) root.pending = null
@@ -191,15 +204,11 @@ Item {
   function approve() { if (pending) { runCli(["decide", pending.id, "allow"]); pending = null } }
   function deny() { if (pending) { runCli(["decide", pending.id, "deny"]); pending = null } }
 
+  // Detached, not a shared Process object: assigning `running = true` while the
+  // previous call was still going was a silent no-op, so approving and then
+  // immediately pausing would drop the pause.
   function runCli(args) {
-    action.command = [cli].concat(args)
-    action.running = true
-  }
-
-  Process {
-    id: action
-    running: false
-    command: []
+    Quickshell.execDetached([cli].concat(args))
   }
 
   // The tool list is read once per shell session: it only changes when the

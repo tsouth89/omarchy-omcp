@@ -13,18 +13,22 @@ and never has to be installed.
 
 import base64
 import errno
+import fcntl
 import json
 import os
+import queue
 import re
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
 VERSION = "1.0.0"
 PROTOCOL_DEFAULT = "2025-06-18"
+SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", "2025-06-18")
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "omcp")
@@ -39,6 +43,7 @@ DECISION_DIR = os.path.join(STATE_DIR, "decisions")
 ACTIVITY_KEEP = 300          # lines retained in the feed the panel reads
 AGENT_STALE_SECONDS = 60     # an agent that stops heartbeating is gone
 ASK_TIMEOUT_SECONDS = 60     # how long a held tool call waits for a decision
+CLIPBOARD_READ_LIMIT = 200000  # a selection larger than this is returned truncated
 
 
 def now():
@@ -46,8 +51,24 @@ def now():
 
 
 def ensure_dirs():
+    # 0700, and re-applied to directories that already exist: pending.json
+    # carries the raw arguments of a held call, which for write_clipboard is the
+    # clipboard text itself, and the activity log records what every agent did.
+    # None of that should be readable by other local accounts.
     for d in (CONFIG_DIR, STATE_DIR, DECISION_DIR):
-        os.makedirs(d, exist_ok=True)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
+    # O_CREAT only sets the mode on creation, so a file written by an older
+    # version keeps its permissive mode forever unless it is corrected here.
+    for f in (ACTIVITY_PATH, AGENTS_PATH, PENDING_PATH, CONFIG_PATH):
+        try:
+            if os.path.exists(f) and (os.stat(f).st_mode & 0o077):
+                os.chmod(f, 0o600)
+        except OSError:
+            pass
 
 
 def write_atomic(path, text):
@@ -57,12 +78,51 @@ def write_atomic(path, text):
     truncate-then-write would hand it invalid JSON on the way through.
     """
     ensure_dirs()
-    tmp = "%s.tmp.%d" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    # A unique temp name per call, not one keyed on the pid: the heartbeat
+    # thread and the request thread both write this file, and a shared name
+    # lets one truncate the other's partial write and then publish it.
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class FileLock:
+    """A cross-process advisory lock.
+
+    Several agents can be connected at once, each with its own server process,
+    all appending to one activity log and rewriting one agent registry. Without
+    this, a read-modify-write in one process silently drops the other's update.
+    """
+
+    def __init__(self, name):
+        ensure_dirs()
+        self.path = os.path.join(STATE_DIR, name + ".lock")
+        self.fd = None
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_):
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
+            self.fd = None
+        return False
 
 
 def read_json(path, fallback):
@@ -127,11 +187,16 @@ def log_activity(entry):
         entry["summary"] = summary[:157] + "..."
     line = json.dumps(entry, ensure_ascii=False)
     try:
-        with open(ACTIVITY_PATH, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        # The log is the audit trail, and several servers append to it at once.
+        # Appending and rotating under one lock keeps a rotation from dropping
+        # another process's line.
+        with FileLock("activity"):
+            fd = os.open(ACTIVITY_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+            _trim_activity()
     except OSError:
         return
-    _trim_activity()
 
 
 def _trim_activity():
@@ -181,10 +246,18 @@ def read_activity(limit=ACTIVITY_KEEP):
 # daemon to sweep.
 
 def pid_alive(pid):
+    """Is this our own still-running process?
+
+    EPERM used to count as alive, which meant a recycled pid now owned by
+    another user kept a departed agent lit in the panel. Only a process we can
+    actually signal is one of ours.
+    """
     try:
         os.kill(int(pid), 0)
     except OSError as exc:
-        return exc.errno == errno.EPERM
+        if exc.errno == errno.EPERM:
+            return False
+        return False
     except (TypeError, ValueError):
         return False
     return True
@@ -204,13 +277,18 @@ def live_agents():
 
 
 def register_agent(agent):
-    others = [a for a in live_agents() if a.get("pid") != agent.get("pid")]
-    write_atomic(AGENTS_PATH, json.dumps({"agents": others + [agent]}, indent=2) + "\n")
+    # Read-modify-write across processes: without the lock, two agents
+    # heartbeating together each publish a snapshot taken before the other's
+    # update, and one of them silently vanishes from the panel.
+    with FileLock("agents"):
+        others = [a for a in live_agents() if a.get("pid") != agent.get("pid")]
+        write_atomic(AGENTS_PATH, json.dumps({"agents": others + [agent]}, indent=2) + "\n")
 
 
 def unregister_agent(pid):
-    others = [a for a in live_agents() if a.get("pid") != pid]
-    write_atomic(AGENTS_PATH, json.dumps({"agents": others}, indent=2) + "\n")
+    with FileLock("agents"):
+        others = [a for a in live_agents() if a.get("pid") != pid]
+        write_atomic(AGENTS_PATH, json.dumps({"agents": others}, indent=2) + "\n")
 
 
 # ------------------------------------------------------------------ approvals
@@ -235,16 +313,47 @@ def _clear_pending():
             pass
 
 
-def _acquire_pending_slot(deadline):
+def _lock_expiry():
+    """When the current holder's claim runs out, or None if not yet readable."""
+    try:
+        with open(PENDING_LOCK, "r", encoding="utf-8") as fh:
+            return int(json.load(fh).get("expires", 0))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _acquire_pending_slot(deadline, expires):
+    """Claim the single approval slot, or give up at `deadline`.
+
+    The expiry is stamped into the lock file itself at creation rather than
+    inferred from pending.json. Reading pending.json instead left a window: a
+    second agent arriving after the lock was created but before the payload was
+    written saw no request, concluded the holder was dead, deleted the live
+    lock, and took the slot too — so both wrote pending.json, the user only ever
+    saw one prompt, and whichever agent lost silently waited out its timeout.
+    """
     while True:
         try:
-            fd = os.open(PENDING_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            os.close(fd)
+            fd = os.open(PENDING_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                os.write(fd, json.dumps({"expires": expires, "pid": os.getpid()}).encode())
+            finally:
+                os.close(fd)
             return True
         except FileExistsError:
-            held = read_json(PENDING_PATH, {})
-            if held.get("expires", 0) < now():
-                _clear_pending()      # the holder died or timed out; take over
+            held = _lock_expiry()
+            if held is None:
+                # Created but not yet stamped, or corrupt. Only reclaim once it
+                # is far too old for a live holder to still be mid-write.
+                try:
+                    stale = (time.time() - os.stat(PENDING_LOCK).st_mtime) > 5
+                except OSError:
+                    continue                      # vanished; try to claim it
+                if stale:
+                    _clear_pending()
+                    continue
+            elif held < now():
+                _clear_pending()                  # holder timed out or died
                 continue
             if time.time() > deadline:
                 return False
@@ -255,11 +364,11 @@ def _acquire_pending_slot(deadline):
 
 def request_approval(agent_name, tool, summary, detail):
     deadline = time.time() + ASK_TIMEOUT_SECONDS
-    if not _acquire_pending_slot(deadline):
+    expires = int(deadline)
+    if not _acquire_pending_slot(deadline, expires):
         return False, "another approval request is already waiting"
 
     request_id = "%d-%d" % (os.getpid(), int(time.time() * 1000))
-    expires = now() + ASK_TIMEOUT_SECONDS
     write_atomic(PENDING_PATH, json.dumps({
         "id": request_id,
         "agent": agent_name,
@@ -274,10 +383,10 @@ def request_approval(agent_name, tool, summary, detail):
     notify("OMCP", "%s wants to %s" % (agent_name, summary),
            urgency="critical", exec_on_click="omarchy-shell omcp open")
 
-    decision_path = os.path.join(DECISION_DIR, request_id + ".json")
+    answer_path = decision_path(request_id)
     try:
         while time.time() < deadline:
-            decision = read_json(decision_path, None)
+            decision = read_json(answer_path, None)
             if decision is not None:
                 granted = decision.get("decision") == "allow"
                 return granted, "approved in the panel" if granted else "denied in the panel"
@@ -285,15 +394,34 @@ def request_approval(agent_name, tool, summary, detail):
         return False, "no answer within %ds" % ASK_TIMEOUT_SECONDS
     finally:
         try:
-            os.unlink(decision_path)
+            os.unlink(answer_path)
         except OSError:
             pass
         _clear_pending()
 
 
+REQUEST_ID_RE = re.compile(r"^\d{1,10}-\d{1,16}$")
+
+
+def decision_path(request_id):
+    """Map a request id to its decision file, refusing anything that is not one.
+
+    The id is minted by this program as "<pid>-<ms>" and only ever handed back
+    to us. Concatenating it into a path unchecked meant a caller-supplied id
+    could walk out of the directory — "../../.bashrc" or an absolute path both
+    resolved outside it, letting `omcp decide` create or clobber a .json file
+    anywhere the user can write. Validate the shape, then keep only the
+    basename, so neither traversal nor an absolute path can survive.
+    """
+    request_id = str(request_id)
+    if not REQUEST_ID_RE.match(request_id):
+        raise ToolError("malformed request id")
+    return os.path.join(DECISION_DIR, os.path.basename(request_id) + ".json")
+
+
 def write_decision(request_id, decision):
     ensure_dirs()
-    write_atomic(os.path.join(DECISION_DIR, request_id + ".json"),
+    write_atomic(decision_path(request_id),
                  json.dumps({"id": request_id, "decision": decision, "at": now()}) + "\n")
 
 
@@ -364,6 +492,21 @@ def notify(title, body="", urgency="normal", exec_on_click=None):
 
 
 # ------------------------------------------------------------------ validators
+
+def clean_label(value, fallback, limit=64):
+    """Make a client-supplied string safe to display and to pass as an argv word.
+
+    The name in an MCP handshake is whatever the client says it is — it
+    identifies, it never authenticates. Control characters would corrupt the
+    single-line log format, and a leading dash could be read as an option by a
+    command this name is interpolated into.
+    """
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", str(value or "")).strip()
+    text = re.sub(r"\s+", " ", text).lstrip("-").strip()
+    if not text:
+        return fallback
+    return text[:limit]
+
 
 ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{4,16}$")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
@@ -578,6 +721,9 @@ def tool_read_clipboard(args):
                  "note": "the clipboard holds non-text content, which this tool does not read"},
                 "read the clipboard (non-text)")
     text = run(["wl-paste", "--no-newline"], check=False)
+    if len(text) > CLIPBOARD_READ_LIMIT:
+        return ({"text": text[:CLIPBOARD_READ_LIMIT], "length": len(text), "truncated": True},
+                "read the clipboard (%d chars, truncated)" % len(text))
     return {"text": text, "length": len(text)}, "read the clipboard (%d chars)" % len(text)
 
 
@@ -651,6 +797,8 @@ def tool_set_wallpaper(args):
         return {"background": run(["omarchy", "theme", "bg", "current"], check=False).strip()}, \
                "moved to the next background"
     path = os.path.expanduser(str(path).strip())
+    if not os.path.isabs(path):
+        raise ToolError("path must be absolute")
     if not os.path.isfile(path):
         raise ToolError("no image at %s" % path)
     if not path.lower().endswith(IMAGE_EXTENSIONS):
@@ -665,6 +813,11 @@ def tool_send_notification(args):
     urgency = str(args.get("urgency") or "normal").strip().lower()
     if urgency not in ("low", "normal", "critical"):
         raise ToolError("urgency must be low, normal or critical")
+    # omarchy-notification-send scans for options on both sides of the headline
+    # and implements no `--` terminator, so a leading dash would be read as a
+    # flag rather than as text. Refuse it here instead of hoping it is ignored.
+    if title.startswith("-") or body.startswith("-"):
+        raise ToolError("notification text may not begin with '-'")
     command = ["omarchy", "notification", "send", "--app-name", "OMCP", "-u", urgency, title]
     if body:
         command.append(body)
@@ -708,19 +861,33 @@ def tool_switch_workspace(args):
     return {"workspace": workspace}, "switched to workspace %d" % workspace
 
 
-def tool_launch_app(args):
-    requested = str(want(args, "app")).strip()
+def resolve_app(requested):
+    """The one place an app name becomes a desktop entry.
+
+    The approval prompt and the launch must agree on what "term" means. When
+    they each resolved it separately — one exact-only, one with a substring
+    fallback — the user could approve one app and have another start.
+    """
+    requested = str(requested).strip()
     entries = desktop_entries()
     entry = entries.get(requested)
+    if entry is not None:
+        return entry
+    lowered = requested.lower()
+    matches = [e for e in entries.values()
+               if not e.get("hidden") and (e["name"].lower() == lowered or e["id"].lower() == lowered)]
+    if not matches:
+        matches = [e for e in entries.values() if not e.get("hidden") and lowered in e["name"].lower()]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def tool_launch_app(args):
+    requested = str(want(args, "app")).strip()
+    entry = resolve_app(requested)
     if entry is None:
-        lowered = requested.lower()
-        matches = [e for e in entries.values()
-                   if not e.get("hidden") and (e["name"].lower() == lowered or e["id"].lower() == lowered)]
-        if not matches:
-            matches = [e for e in entries.values() if not e.get("hidden") and lowered in e["name"].lower()]
-        if len(matches) != 1:
-            raise ToolError("no single app matches %r — call list_apps to see valid ids" % requested)
-        entry = matches[0]
+        raise ToolError("no single app matches %r — call list_apps to see valid ids" % requested)
     launch_detached(["gio", "launch", entry["path"]])
     return {"launched": entry["id"], "name": entry["name"]}, "launched %s" % entry["name"]
 
@@ -1008,13 +1175,7 @@ def describe_intent(name, arguments):
         # the prompt says "launch Obsidian" rather than echoing a raw id back.
         requested = str(arguments.get("app", "")).strip()
         try:
-            entries = desktop_entries()
-            entry = entries.get(requested)
-            if entry is None:
-                lowered = requested.lower()
-                matches = [e for e in entries.values() if not e.get("hidden")
-                           and (e["id"].lower() == lowered or e["name"].lower() == lowered)]
-                entry = matches[0] if len(matches) == 1 else None
+            entry = resolve_app(requested)
             if entry:
                 return "launch %s" % entry["name"]
         except OSError:
@@ -1044,6 +1205,32 @@ def content_for(payload):
 
 # ----------------------------------------------------------------- mcp server
 
+def sweep_stale_state():
+    """Clear anything a previous run could not clean up after itself.
+
+    A server killed outright never runs its finally block, so an expired lock or
+    an answered-too-late decision file can outlive it. Both are safe to drop
+    once their deadline has passed.
+    """
+    try:
+        expiry = _lock_expiry()
+        if expiry is not None and expiry < now():
+            _clear_pending()
+    except OSError:
+        pass
+    try:
+        cutoff = now() - ASK_TIMEOUT_SECONDS * 2
+        for name in os.listdir(DECISION_DIR):
+            full = os.path.join(DECISION_DIR, name)
+            try:
+                if os.path.getmtime(full) < cutoff:
+                    os.unlink(full)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 class Server:
     def __init__(self):
         self.agent_name = "an agent"
@@ -1052,6 +1239,8 @@ class Server:
         self.calls = 0
         self.started = now()
         self.stop = threading.Event()
+        self.write_lock = threading.Lock()
+        self.work = queue.Queue()
 
     # -- agent registry ----------------------------------------------------
     def heartbeat_entry(self):
@@ -1071,19 +1260,22 @@ class Server:
         threading.Thread(target=beat, daemon=True).start()
 
     def teardown(self, *_):
+        """Signal handler: flip a flag and let serve()'s finally do the work.
+
+        Unregistering from here meant a signal arriving mid-write could re-enter
+        the same file write on the same path, and a signal landing between the
+        temp write and the rename stranded a temp file for good.
+        """
         self.stop.set()
-        if self.registered:
-            try:
-                unregister_agent(os.getpid())
-            except OSError:
-                pass
-            self.registered = False
-        sys.exit(0)
+        raise SystemExit(0)
 
     # -- protocol ----------------------------------------------------------
     def send(self, message):
-        sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
+        # Tool results come from the worker thread while the read loop may be
+        # answering a ping, so one lock owns stdout.
+        with self.write_lock:
+            sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
 
     def reply(self, request_id, result):
         self.send({"jsonrpc": "2.0", "id": request_id, "result": result})
@@ -1092,23 +1284,21 @@ class Server:
         self.send({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
 
     def handle_initialize(self, request_id, params):
-        client = params.get("clientInfo") or {}
-        self.agent_name = str(client.get("name") or "an agent")
-        self.agent_version = str(client.get("version") or "")
+        client = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
+        self.agent_name = clean_label(client.get("name"), "an agent")
+        self.agent_version = clean_label(client.get("version"), "", limit=32)
 
         ensure_dirs()
         self.touch()
         self.registered = True
-
-        if load_config()["notifyOnConnect"]:
-            notify("OMCP", "%s is connected and can drive this desktop." % self.agent_name, urgency="low")
         log_activity({"agent": self.agent_name, "tool": "connect", "state": "ok",
                       "summary": "%s connected" % self.agent_name})
 
-        # Speak the version the client asked for when it looks like a real
-        # protocol date, so a newer agent is not turned away by an older pin.
+        # Answer with the client's version only when it is one we actually
+        # speak. Echoing any date-shaped string back claimed support for
+        # revisions this server has never implemented.
         requested = str(params.get("protocolVersion") or "")
-        version = requested if re.match(r"^\d{4}-\d{2}-\d{2}$", requested) else PROTOCOL_DEFAULT
+        version = requested if requested in SUPPORTED_PROTOCOLS else PROTOCOL_DEFAULT
 
         self.reply(request_id, {
             "protocolVersion": version,
@@ -1122,6 +1312,14 @@ class Server:
                 "to ask the user for approval and will block until they answer."
             ),
         })
+
+        # After the handshake, never before it: this shells out, and a slow
+        # notification daemon would otherwise stall the client's initialize.
+        if load_config()["notifyOnConnect"]:
+            threading.Thread(
+                target=notify,
+                args=("OMCP", "%s is connected and can drive this desktop." % self.agent_name),
+                kwargs={"urgency": "low"}, daemon=True).start()
 
     def handle_tools_list(self, request_id):
         config = load_config()
@@ -1144,21 +1342,48 @@ class Server:
         self.reply(request_id, {"tools": tools})
 
     def handle_tools_call(self, request_id, params):
-        name = params.get("name")
-        arguments = params.get("arguments") or {}
-        self.calls += 1
-        self.touch()
-        try:
-            payload = call_tool(name, arguments, self.agent_name)
-        except ToolError as exc:
-            self.reply(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            self.fail(request_id, -32602, "arguments must be an object")
             return
-        self.reply(request_id, {"content": content_for(payload)})
+        # Hand off and keep reading. A tool gated on approval parks for up to a
+        # minute; running it here would leave pings and everything queued behind
+        # it unanswered until the user came back.
+        self.work.put((request_id, params.get("name"), arguments))
+
+    def run_work(self):
+        while True:
+            item = self.work.get()
+            if item is None:
+                return
+            request_id, name, arguments = item
+            self.calls += 1
+            self.touch()
+            try:
+                payload = call_tool(name, arguments, self.agent_name)
+            except ToolError as exc:
+                self.reply(request_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
+            except Exception as exc:                       # noqa: BLE001 - one call must not end the session
+                self.reply(request_id, {"content": [{"type": "text",
+                                                     "text": "%s: %s" % (type(exc).__name__, exc)}],
+                                        "isError": True})
+            else:
+                self.reply(request_id, {"content": content_for(payload)})
 
     def handle(self, message):
         method = message.get("method")
         request_id = message.get("id")
-        params = message.get("params") or {}
+        params = message.get("params")
+        if not isinstance(params, dict):
+            params = {}
+
+        # No "id" means a notification, and JSON-RPC forbids answering one.
+        # Replying "id": null was both a spec violation and indistinguishable
+        # from a parse-error reply.
+        if "id" not in message:
+            return
 
         if method == "initialize":
             self.handle_initialize(request_id, params)
@@ -1170,17 +1395,27 @@ class Server:
             self.handle_tools_list(request_id)
         elif method == "tools/call":
             self.handle_tools_call(request_id, params)
-        elif method in ("resources/list", "prompts/list"):
-            self.reply(request_id, {"resources": [], "prompts": []} if method == "resources/list"
-                       else {"prompts": []})
+        elif method == "resources/list":
+            self.reply(request_id, {"resources": []})
+        elif method == "prompts/list":
+            self.reply(request_id, {"prompts": []})
         elif request_id is not None:
             self.fail(request_id, -32601, "method not found: %s" % method)
 
     def serve(self):
         ensure_dirs()
+        sweep_stale_state()
         signal.signal(signal.SIGTERM, self.teardown)
         signal.signal(signal.SIGINT, self.teardown)
+        # One undecodable byte on the pipe used to raise straight out of the
+        # read loop and kill the process, taking any request buffered ahead of
+        # it down unanswered as well.
+        try:
+            sys.stdin.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
         self.start_heartbeat()
+        threading.Thread(target=self.run_work, daemon=True).start()
         try:
             for line in sys.stdin:
                 line = line.strip()
@@ -1191,6 +1426,12 @@ class Server:
                 except ValueError:
                     self.fail(None, -32700, "parse error")
                     continue
+                # Valid JSON is not necessarily a request object. An array (a
+                # batch) or a bare scalar has no .get, and the old recovery path
+                # called .get on it again and took the process down.
+                if not isinstance(message, dict):
+                    self.fail(None, -32600, "invalid request")
+                    continue
                 try:
                     self.handle(message)
                 except Exception as exc:                       # noqa: BLE001 - never kill the loop
@@ -1198,6 +1439,7 @@ class Server:
                         self.fail(message.get("id"), -32603, "internal error: %s" % exc)
         finally:
             self.stop.set()
+            self.work.put(None)
             if self.registered:
                 log_activity({"agent": self.agent_name, "tool": "disconnect", "state": "ok",
                               "summary": "%s disconnected" % self.agent_name})
@@ -1307,6 +1549,9 @@ def cmd_pause(argv):
 def cmd_decide(argv):
     if len(argv) < 2 or argv[1] not in (ALLOW, DENY):
         print("usage: omcp decide <id> <allow|deny>", file=sys.stderr)
+        return 2
+    if not REQUEST_ID_RE.match(str(argv[0])):
+        print("not a request id: %r" % argv[0], file=sys.stderr)
         return 2
     write_decision(argv[0], argv[1])
     return 0

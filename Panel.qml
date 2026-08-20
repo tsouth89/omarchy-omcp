@@ -75,6 +75,25 @@ Panel {
 
   function hasCursor(id) { return currentRowId === id }
 
+  // The row list changes shape underneath the cursor — Approve and Deny appear
+  // at the top the moment an agent asks for something. A bare index would then
+  // point at a different row than the one under the highlight, so an Enter the
+  // user had already decided on could answer a request they had not read. Track
+  // the row by identity and drop the cursor entirely when its row disappears.
+  property string anchoredRowId: ""
+  onCurrentRowIdChanged: if (currentRowId !== "") anchoredRowId = currentRowId
+
+  function reanchorCursor() {
+    if (!cursorActive) return
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].id === anchoredRowId) { cursor = i; return }
+    }
+    cursorActive = false
+    cursor = 0
+  }
+
+  onRowsChanged: reanchorCursor()
+
   // -------------------------------------------------------------- behaviour
 
   function moveCursor(dx, dy) {
@@ -96,8 +115,9 @@ Panel {
   function trigger(id) {
     if (id.indexOf("tool:") === 0) {
       var name = id.substring(5)
+      // No catalog reload: titles and defaults are static, and the effective
+      // permission arrives on the config.json watch.
       engine.setPermission(name, Model.nextPermission(engine.permissionFor(name)))
-      Qt.callLater(function() { engine.loadCatalog() })
       return
     }
     switch (id) {
@@ -134,7 +154,9 @@ Panel {
 
   function flash(message) { notice = message; noticeTimer.restart() }
 
-  implicitWidth: button.implicitWidth
+  // Collapse rather than leave an invisible slot-wide gap when the ghost is
+  // hidden, the way the first-party media widget does.
+  implicitWidth: button.visible ? button.implicitWidth : 0
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
@@ -151,9 +173,12 @@ Panel {
     panelOwned: true
     feedLength: root.feedLength
 
-    // A request that needs an answer should not wait politely behind a closed
-    // panel — the notification already fired, so put the UI where the eyes are.
-    onPendingChanged: if (pending && !root.opened) root.open()
+    // Deliberately does NOT open the panel. This surface takes exclusive
+    // keyboard focus, so summoning it the moment an agent asks would yank the
+    // keyboard out of whatever the user was typing into — with Approve bound to
+    // a single keystroke. An agent must never be able to make the next key you
+    // press mean "yes". The ghost turns red and breathes, and a notification
+    // fires; opening it stays the user's move.
   }
 
   Timer { id: noticeTimer; interval: 3200; onTriggered: root.notice = "" }
@@ -164,6 +189,8 @@ Panel {
 
     function open(): void { root.open() }
     function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function openTab(name: string): string {
       if (root.tabs.indexOf(name) < 0) return "unknown tab: " + name
@@ -266,12 +293,18 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         var key = String(t).toLowerCase()
-        if (key === "a" && engine.awaitingApproval) root.trigger("approve")
-        else if (key === "d" && engine.awaitingApproval) root.trigger("deny")
+        // Answering a held request takes a deliberate keyboard user: `a` and `d`
+        // do nothing until the cursor has been moved into the panel. Otherwise
+        // one stray keystroke, from someone who never saw the prompt, decides
+        // it. Navigating first is the cheap proof that you are looking at it.
+        if (key === "a" && engine.awaitingApproval && root.cursorActive) root.trigger("approve")
+        else if (key === "d" && engine.awaitingApproval && root.cursorActive) root.trigger("deny")
         else if (key === "p") root.trigger("pause")
         else if (key === "c") { root.tab = "connect"; root.cursor = 0 }
         else if (key === "t") { root.tab = "tools"; root.cursor = 0 }
-        else if (key === "l") { root.tab = "activity"; root.cursor = 0 }
+        // `f` rather than `l`: PanelKeyCatcher eats l/h/j/k as vim motion keys
+        // and never emits them here.
+        else if (key === "f") { root.tab = "activity"; root.cursor = 0 }
       }
 
       Flickable {
